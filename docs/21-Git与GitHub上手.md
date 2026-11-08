@@ -109,7 +109,7 @@ git ls-files 文件名             # 有输出=已被 Git 跟踪
 
 ---
 
-## 7. 以后想让别人也能用
+## 7. 许可证与仓库信息
 
-- 加 `LICENSE`（MIT / Apache-2.0 最常见）——**没有许可证 = 保留所有权利**，别人不能合法复用。
-- 加仓库简介和 topics：GitHub 仓库页右上角 ⚙️ → Description / Topics。
+- 本仓库已用 **MIT 许可证**（根目录 `LICENSE`）：别人可以自由使用、修改、商用，只需保留版权声明。
+- 仓库简介和 topics 已配置；以后想改，在仓库页右上角 ⚙️ → Description / Topics。
