@@ -1,0 +1,45 @@
+---Clicking the world like a player: right-click a block (opening its window) or an entity, use what you hold, hit something once, get into bed.
+---@class numen.use
+---@field block fun(cell: Pos, opts?: {hold?: number, item?: string, sneak?: boolean}): Window|Clicked Aim at a block, fluid or air cell within reach and right-click it: the full native click. When it opens a window (a chest, a furnace, a machine) it returns that Window.
+---@field entity fun(entity: integer|Entity, opts?: {hold?: number, item?: string, sneak?: boolean}): EntityClicked Right-click an entity within reach and in sight of where you stand.
+---@field hit fun(target: Pos|Entity): Clicked|EntityClicked Left-click a cell or an entity within reach once, with what you hold.
+---@field item fun(opts?: {hold?: number, item?: string, sneak?: boolean}): Clicked Right-click at nothing in particular: the held item acts straight ahead, where you face.
+---@field sleep fun(opts?: {at?: Pos}): Slept Get into a bed you are standing next to, and say whether you are actually asleep.
+numen.use = {}
+
+---The window you have open (your own inventory menu when nothing else is): every container and crafting-grid slot, and your own filled ones.
+---@class Window
+---@field menu string InventoryMenu when it is your own inventory.
+---@field slots WindowSlot[]
+---@field cursor? string What the cursor holds.
+---@field data integer[] The menu's numbers: progress, fuel, energy (meaning is GUI-specific; a furnace's are lit time, lit duration, cook progress, cook total).
+---@field block? Block The block whose window it is, when a click on it opened it.
+---@field put fun(self: Window, item: string, count?: integer): integer Put items of one kind from your inventory into this window: all of them, or count.
+---@field take fun(self: Window, item: string, count?: integer): integer Take items of one kind out of this window into your inventory: all of them, or count.
+---@field move fun(self: Window, from: integer, to: integer, opts?: table) Move items from slot from to slot to of this window; opts.count moves part of the stack.
+---@field quick fun(self: Window, slot: integer) Shift-click a slot of this window: its whole stack goes to the other side.
+---@field close fun(self: Window) Close this window.
+
+---@class WindowSlot
+---@field index integer What numen.gui.move and numen.gui.quick take.
+---@field side "container"|"you"|"grid"|"result"
+---@field item? string Empty slots have none.
+---@field count? integer
+---@field output? boolean A slot you only take from.
+
+---What a click did.
+---@class Clicked
+---@field button "left"|"right"
+---@field aim? Pos The cell aimed at.
+---@field block? Block The block the click used, when it opened or worked a station.
+---@field changes string[] What changed: your inventory, health and riding, the block, new entities; empty means the click did nothing.
+
+---What a click on an entity did.
+---@class EntityClicked
+---@field button "left"|"right"
+---@field entity_id integer
+---@field changes string[] What changed; empty means the click did nothing.
+
+---@class Slept
+---@field bed Pos The bed's head.
+---@field sleeping boolean

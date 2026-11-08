@@ -1,0 +1,65 @@
+{
+  "persona": "default",
+  "description": "默认台词库。中性、口语、短句。新建 <人设名>.json 即可覆盖同名 id 或追加条目。",
+  "entries": [
+    {
+      "id": "arrived",
+      "when": "arrived",
+      "text": ["到了", "我回来了", "到啦"],
+      "cooldownSeconds": 45,
+      "weight": 2
+    },
+    {
+      "id": "arrived_far",
+      "when": "arrived_far",
+      "slots": ["dist"],
+      "text": ["到了，走了好远", "回来了，离你 {dist} 格", "跑回来啦"],
+      "cooldownSeconds": 90,
+      "weight": 1
+    },
+    {
+      "id": "leash_return",
+      "when": "leash_return",
+      "slots": ["dist"],
+      "text": ["跑远了，我回来", "离你 {dist} 格了，往回走", "等等我，这就回"],
+      "cooldownSeconds": 120,
+      "weight": 2
+    },
+    {
+      "id": "task_failed",
+      "when": "task_failed",
+      "slots": ["reason"],
+      "text": ["这边过不去", "有点麻烦，{reason}", "试过了，不成"],
+      "cooldownSeconds": 180,
+      "weight": 1
+    },
+    {
+      "id": "hungry",
+      "when": "hungry",
+      "text": ["有点饿了", "肚子空了", "得找点吃的"],
+      "cooldownSeconds": 300,
+      "weight": 1
+    },
+    {
+      "id": "fled",
+      "when": "fled",
+      "text": ["先撤一下", "打不过，跑", "躲一下"],
+      "cooldownSeconds": 120,
+      "weight": 1
+    },
+    {
+      "id": "death",
+      "when": "death",
+      "text": ["我…死了", "没撑住", "对不起，我挂了"],
+      "cooldownSeconds": 600,
+      "weight": 1
+    },
+    {
+      "id": "companion_missing",
+      "when": "companion_missing",
+      "text": ["我不在这个世界", "好像把我弄丢了"],
+      "cooldownSeconds": 600,
+      "weight": 1
+    }
+  ]
+}

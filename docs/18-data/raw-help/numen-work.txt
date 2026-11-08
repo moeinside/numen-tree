@@ -1,0 +1,25 @@
+---Gathering where you stand: digging blocks within reach, fishing. numen.work.collect (library) walks to the drops and picks them up.
+---@class numen.work
+---@field dig fun(blocks: Pos|Block|(Pos|Block)[], opts?: {count?: integer}): Dug Dig the given blocks that are within reach of where you stand.
+---@field fish fun(): string[] Cast a fishing rod once from where you stand, wait for a bite and reel it in.
+---@field collect fun(opts?: table): integer Pick up the dropped items around you, nearest first, walking onto each with numen.move.to.
+---@field mine fun(cluster: Cluster|Cells): integer Dig out one cluster, walking first: walk within reach of it (numen.move.to with arrive "dig": where your hand reaches the most of what is left of it, digging and pillaring on the way but keeping away from cells needing your owner's consent), dig what is in reach (numen.work.dig), pick up what that dig dropped and still lies around (numen.work.collect with its drops), and again until none of it is left.
+numen.work = {}
+
+---What a dig did.
+---@class Dug
+---@field dug integer Cells it dug.
+---@field left integer Cells of what you gave still to dig.
+---@field out_of_reach integer Of those, how many your hand does not reach from where you stand.
+---@field nearest? Pos The nearest of those out of reach.
+---@field drops Drop[] Where what it dug dropped went.
+
+---Where some of what a dig dropped went.
+---@class Drop
+---@field item string The item id, minecraft:cobblestone.
+---@field count integer How many.
+---@field fate "landed"|"picked_up"|"destroyed"|"void"|"gone"|"moving" landed (lies on the ground), picked_up, destroyed (burned in lava or fire, broken on a cactus …), void (fell out of the world), gone (taken by something that is no creature, a hopper …) or moving (still falling or drifting when the dig stopped waiting).
+---@field pos Pos The cell it landed in, was destroyed or picked up in, or was in when the dig stopped waiting.
+---@field by? string Who picked it up: you, a player's name, or a creature's type id.
+---@field cause? string What destroyed it: the damage type id, minecraft:lava.
+---@field id? integer The entity id of the item still lying there (landed or moving), as numen.scan.entities gives it.

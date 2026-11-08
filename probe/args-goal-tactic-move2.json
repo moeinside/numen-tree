@@ -1,0 +1,1 @@
+{"companion": "bigWhale", "skill": "tactic", "priority": 60, "params": {"tactic": "move_segment", "params": {"target": {"x": -48, "y": 64, "z": 104}, "arrive": 3}}}

@@ -1,0 +1,56 @@
+---Pathfinding: plan a walk from a description, without moving; numen.move.go walks the plan.
+---@class numen.route
+---@field plan fun(opts?: numen.route.plan.opts): Plan Plan a walk from where you stand, without moving: each leg's way, the blocks it would break or place, and the cells it would ask your owner about.
+numen.route = {}
+
+---Touching blocks a scan found (diagonals count): every block, nearest first.
+---@class Cluster
+---@field blocks Block[] Every block of it, nearest first.
+---@field nearest Block The block nearest to where you stood.
+---@field count integer How many blocks.
+---@field filter fun(self: Cluster, keep: fun(block: Block):): Cluster The blocks of this cluster that keep(block) says yes to, as a cluster (nearest first, as before).
+---@field minus fun(self: Cluster, other: Cells|(Block|Pos)[]|Pos|Block): Cluster This cluster without the cells other has: Cells, a list of Blocks or Pos, or one Pos or Block.
+
+---One stop on the way, before the destination.
+---@class Stop
+---@field to Pos|Block|Entity|Cluster|Cells|{x: number, z: number}|{y: number} Where: the same kinds of place the destination takes.
+---@field type? "through"|"stop" through: pass it without stopping (the default); stop: come to rest there first.
+---@field arrive? "at"|"near"|"use"|"dig"|"place"|"away" What counts as there, as for the destination; default at.
+---@field range? integer With near or away, as for the destination.
+
+---Preference knobs for one walk; leave out what you don't care about.
+---@class Costs
+---@field dig? boolean|number false: never break a block (default). true: may dig through, each block costing its dig time plus 30. A number: may dig, with that extra cost per block.
+---@field place? boolean|number false: never place a block (default). true: may pillar and bridge with materials, 20 per block. A number: may, with that cost per block.
+---@field consent? boolean|number Cells your owner must agree to change (their builds, their chests …). A number (default 10): plannable at that many times the price; the plan lists them and the walk stops at each to ask. false: keep away from them, never bother your owner.
+---@field jump? number Extra cost per jump (default 2); raise it for a flatter walk.
+---@field swim? number Extra cost per block through water (default 3).
+---@field fall? integer Highest drop to take without water below (default 3); higher only when your health can take it.
+---@field parkour? boolean Allow running jumps over 2-4 block gaps (default false).
+---@field max_changes? integer How many blocks the whole walk may break and place at most; ways over it are dropped (default: no limit).
+
+---A walk planned from where you stood, without moving: what numen.move.go walks and keeps to. Good only within the program that made it.
+---@class Plan
+---@field ok boolean No leg is unreachable: numen.move.go can walk it.
+---@field why? string When not ok: why the unreachable leg can't be walked.
+---@field id string Which plan this is, for numen.move.go.
+---@field spec Directions The description you gave, as given: change it and plan again.
+---@field from Pos Where it was planned from.
+---@field steps integer Steps of the seen part, all legs.
+---@field seconds number About how long the seen part takes.
+---@field legs Leg[] One per stop, the destination last.
+
+---Where to go and how, as numen.route.plan takes it; a Plan carries it back as spec.
+---@class Directions
+---@field to? Pos|Block|Entity|Cluster|Cells|{x: number, z: number}|{y: number} The destination: a Pos, a Block or an Entity (anything with a pos goes as its cell; an entity as where it is when planned), a Cluster from a scan or Cells (any of its cells), a column {x = …, z = …}, or a height {y = …}.
+---@field arrive? "at"|"near"|"use"|"dig"|"place"|"away" What counts as there. at: stand in that cell (column, height; any cell of a Cluster). near: within range of it. use: stand where that block is in sight and in reach, to use it. dig: stand where your hand reaches it (for a Cluster, the most of its cells), even if something is in the way, to dig it with numen.work.dig. place: stand where your hand reaches that cell, air too, without standing in it, to build into it with numen.build.place. away: at least range blocks from it (to get away from something).
+---@field range? integer With arrive near: how close counts as there; with arrive away: how far to get (1-64).
+---@field stops? Stop[] Waypoints before the destination, in order: {{to = …, type = "through"}, …}. A through stop is passed without stopping; a stop one is come to rest at first.
+---@field mode? "walk"|"boat" How to travel. walk: on foot. boat: steer the boat you sit in across the water, to the water nearest each stop (a stop on land ends at the shore).
+---@field costs? Costs Preference knobs: {dig = …, place = …, consent = …, jump = …, swim = …, fall = …, parkour = …, max_changes = …}; see the Costs class.
+---@field avoid? string|Pos|Block|Pos[]|Cluster|Cells|(string|Pos|Block|Pos[]|Cluster|Cells)[] Keep out of these entirely: cell types by name ("water", "door", "climbable" …), a cell (a Pos or a Block), a box {Pos, Pos} written as one item ({{x = 0, y = 60, z = 0}, {x = 9, y = 70, z = 9}}), a Cluster or Cells. Never stood in or on.
+---@field allow? "flowing_water"|"trigger"|"fragile"[] Cell types kept out by default that this walk may use: flowing_water (currents push her off the route), trigger (pressure plates and tripwires), fragile (farmland and turtle eggs).
+---@field avoid_break? string|Pos|Block|Pos[]|Cluster|Cells|(string|Pos|Block|Pos[]|Cluster|Cells)[] Never break these blocks (ids or #tags), or anything in these cells, boxes, Clusters or Cells.
+---@field avoid_place? string|Pos|Block|Pos[]|Cluster|Cells|(string|Pos|Block|Pos[]|Cluster|Cells)[] Never place a block into cells holding these (ids or #tags), or into these cells, boxes, Clusters or Cells.
+---@field avoid_step? string|Pos|Block|Pos[]|Cluster|Cells|(string|Pos|Block|Pos[]|Cluster|Cells)[] Never sta
+[returned value cut at 6000 characters; it was 7997]

@@ -1,0 +1,4 @@
+The script stopped at line 1 after 1 call: numen.api.help: not_found — there is no function, group or module named numen.chat
+hint: the <api> index lists every group; numen.api.help("numen.move") lists one.
+stderr:
+line 1 numen.api.help: not_found — there is no function, group or module named numen.chat

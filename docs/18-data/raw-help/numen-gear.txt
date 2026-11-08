@@ -1,0 +1,13 @@
+---What you wear and hold: putting it on, taking it in hand, taking it off.
+---@class numen.gear
+---@field hold fun(item: string, opts?: {hand?: "main"|"off"}): Change Take an item from your backpack into your hand.
+---@field remove fun(opts?: {slot?: string, item?: string}): Change Take gear off back into your backpack.
+---@field wear fun(item: string, opts?: {slot?: string}): Change Wear an item from your backpack: armor, or an accessory a mod adds slots for.
+numen.gear = {}
+
+---What a wear, hold or remove changed.
+---@class Change
+---@field item? string The item it was about.
+---@field slot? string The slot it ended in.
+---@field removed string[] What came off into your backpack.
+---@field still_worn string[] What stayed on (no room in your backpack, or it refuses to come off).

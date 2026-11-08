@@ -1,0 +1,8 @@
+---Creative mode only: conjuring items, like the creative menu.
+---@class numen.creative
+---@field give fun(item: string, opts?: {count?: integer}): Took Conjure items into your inventory, like the creative menu.
+numen.creative = {}
+
+---@class Took
+---@field took integer
+---@field carrying integer

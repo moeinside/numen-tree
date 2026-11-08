@@ -1,0 +1,63 @@
+---Your body, your owner and the world right now.
+---@class numen.status
+---@field owner fun(): Owner Your owner: online or not, health, hunger, position, distance from you, held items.
+---@field self fun(): Self Your body: health, hunger, position, biome, what is in your hands and on you, movement state.
+---@field world fun(): World The world: dimension, game time, whether it is bright or dark outside, weather.
+numen.status = {}
+
+---Your owner right now; when they are offline, only online (false) is there.
+---@class Owner
+---@field online boolean
+---@field id? integer Their entity id.
+---@field name? string
+---@field pos? Pos Where they are (decimals), in their dimension's coordinates.
+---@field distance? number Blocks from you, in the same dimension.
+---@field same_dimension? boolean
+---@field dimension? string
+---@field hp? number
+---@field max_hp? number
+---@field hunger? integer
+---@field saturation? number
+---@field main_hand? string
+---@field off_hand? string
+
+---Your body right now.
+---@class Self
+---@field id integer Your own entity id.
+---@field name string
+---@field game_mode string survival, creative, adventure or spectator.
+---@field hp number
+---@field max_hp number
+---@field hunger integer 0-20.
+---@field saturation number
+---@field pos Pos Where you are (decimals).
+---@field dimension string
+---@field biome string
+---@field structures string[] Structures you stand in.
+---@field hands Hands What is in your hands.
+---@field backpack_slots Slots
+---@field on_ground boolean
+---@field in_water boolean
+---@field air integer Breath left, in ticks.
+---@field max_air integer
+---@field in_lava boolean
+---@field body_state? string What you wear and what mods report about your body.
+
+---@class Hands
+---@field mainhand? Held
+---@field offhand? Held
+
+---@class Held
+---@field item string
+---@field count integer
+
+---@class Slots
+---@field used integer
+---@field total integer
+
+---@class World
+---@field dimension string
+---@field game_time integer
+---@field is_bright_outside boolean
+---@field is_dark_outside boolean
+---@field weather "clear"|"rain"|"thunder"

@@ -1,0 +1,26 @@
+---Modules — functions written in Lua 5.2 that programs use by name, kept as files on your owner's computer (numen/work.lua is numen.work): the built-in ones, your own, and how the programs that used them went.
+---@class numen.module
+---@field delete fun(name: string) Delete a module. A built-in one stays deleted until you reset it.
+---@field list fun(): ModuleInfo[] The modules: what each does, whose it is, how the programs that used it went.
+---@field reset fun(name: string) Put a built-in module back as it shipped with this version: your changes go, a deleted one comes back.
+---@field save fun(code: string, opts?: {name?: string}): Saved Keep a module under a name: programs then use its functions by that name. Saving under a built-in module's name changes that module.
+---@field show fun(name: string, opts?: {factory?: boolean}): Shown Show a module in full, with how the programs that used it went.
+numen.module = {}
+
+---@class ModuleInfo
+---@field name string
+---@field summary string Its first comment line.
+---@field whose string built in, built in and changed, deleted, or yours; and whether it compiles.
+---@field runs integer How many programs used it.
+---@field finished integer How many of those ran to the end.
+---@field last_run? integer When a program last used it, epoch milliseconds.
+---@field failed_line? integer The line the last unfinished program stopped at.
+---@field failed_why? string Why it stopped there.
+
+---@class Saved
+---@field name string The name it is kept under.
+---@field how "new"|"replaced"|"changed" new, replaced (a file of that name was there; its record starts over), or changed (a built-in module: numen.module.reset(name) puts it back).
+
+---@class Shown: ModuleInfo
+---@field factory boolean Whether the text is the one it shipped with.
+---@field code string The whole module.

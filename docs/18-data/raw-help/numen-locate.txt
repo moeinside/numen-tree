@@ -1,0 +1,14 @@
+---Find the nearest structure or biome in the dimension you are in.
+---@class numen.locate
+---@field biome fun(biome: string): Located Find the nearest biome of a type: its column, compass direction and distance.
+---@field structure fun(structure: string): Located Find the nearest structure of a type: its column, compass direction and distance.
+numen.locate = {}
+
+---Where the nearest one is, or how far the search went without finding one.
+---@class Located
+---@field found boolean Whether one was found.
+---@field pos? Pos|{x: number, z: number}|{y: number} The column it is in: numen.move.to takes it and finds the height on its own.
+---@field direction? string Compass direction from where you stand.
+---@field horizontal_distance? integer Blocks to it, horizontally.
+---@field searched? integer How far out the search went when nothing was found; 0 means it does not generate in this dimension.
+---@field dimension string The dimension searched: yours.

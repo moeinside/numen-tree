@@ -1,0 +1,19 @@
+numen: 18 groups. `numen.api.help("numen.api")` lists one with its types.
+numen.api — The API itself: the typed signatures of a group's or a module's functions, or one function in full. help
+numen.build — Building: make the cells your hand reaches from where you stand look like Cells (numen.shape draws them) or a blueprint file. numen.build.raise (library) walks the site and builds all of it. blueprint, diff, place, raise
+numen.creative — Creative mode only: conjuring items, like the creative menu. give
+numen.fight — Combat: attack one entity you name. numen.fight.clear (library) fights off every hostile near you, one by one. attack, clear
+numen.gear — What you wear and hold: putting it on, taking it in hand, taking it off. hold, remove, wear
+numen.gui — The window you have open (numen.use.block on a chest or a machine opens one): read it, put items in and take them out, move a stack, close it. close, move, put, quick, take, view, count
+numen.inv — Your inventory: what you carry, recipes, crafting, eating, dropping. count, craft, craftable, drop, eat, items, recipes, make, store, fetch, smelt, give
+numen.locate — Find the nearest structure or biome in the dimension you are in. biome, structure
+numen.mc — Minecraft and mod commands, as a player types them in chat, with your own permission level. run
+numen.module — Modules — functions written in Lua 5.2 that programs use by name, kept as files on your owner's computer (numen/work.lua is numen.work): the built-in ones, your own, and how the programs that used them went. delete, list, reset, save, show
+numen.move — Moving: walk a plan from numen.route.plan, follow someone for a while, step off what you ride. numen.move.to (library) plans and walks to one place. dismount, follow, go, to, flee, explore
+numen.route — Pathfinding: plan a walk from a description, without moving; numen.move.go walks the plan. plan
+numen.scan — Look around you: the ground map, where blocks are, who is near, one block and what it holds, whether you can see something. block, blocks, container, entities, map, sight, cluster
+numen.status — Your body, your owner and the world right now. owner, self, world
+numen.task — The background task and your pending timers. status, stop, timer
+numen.time — Pausing your program: waiting a while where you stand. wait, wait_until
+numen.use — Clicking the world like a player: right-click a block (opening its window) or an entity, use what you hold, hit something once, get into bed. block, entity, hit, item, sleep
+numen.work — Gathering where you stand: digging blocks within reach, fishing. numen.work.collect (library) walks to the drops and picks them up. dig, fish, collect, mine

@@ -1,0 +1,1 @@
+{"companion": "bigWhale", "intent": "make_item", "params": {"craft": {"item": "minecraft:chest", "chain": true, "count": 1}}}

@@ -1,0 +1,5 @@
+---Pausing your program: waiting a while where you stand.
+---@class numen.time
+---@field wait fun(seconds: number): number Stand where you are for a number of seconds, then go on.
+---@field wait_until fun(ready: fun():, opts?: {every?: number, timeout?: number}): number Wait until ready() returns true, checking every opts.every seconds (default 1).
+numen.time = {}

@@ -1,0 +1,1 @@
+{"companion": "bigWhale", "skill": "pave_forward", "priority": 50, "params": {"target": {"x": -55, "y": 65, "z": 102}, "item": "minecraft:spruce_log", "maxSteps": 3, "reach": 2.5}}

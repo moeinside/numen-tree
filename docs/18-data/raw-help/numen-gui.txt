@@ -1,0 +1,30 @@
+---The window you have open (numen.use.block on a chest or a machine opens one): read it, put items in and take them out, move a stack, close it.
+---@class numen.gui
+---@field close fun(): boolean Close the window you have open, once you have finished with it. Returns true when it closed one, false when none was open.
+---@field move fun(from: integer, to: integer, opts?: {count?: integer}) Move items from one slot of the window you have open to another: move, merge or swap.
+---@field put fun(item: string, count?: integer): integer Put items of one kind from your inventory into the window you have open: all of them, or count.
+---@field quick fun(from: integer) Shift-click a slot of the window you have open: its whole stack goes to the other side.
+---@field take fun(item: string, count?: integer): integer Take items of one kind out of the window you have open into your inventory: all of them, or count.
+---@field view fun(): Window Look at the window you have open, or at your own inventory menu when none is.
+---@field count fun(item: string): integer How many of item the window's own side holds (its container slots, not your inventory), counted in the open window now.
+numen.gui = {}
+
+---The window you have open (your own inventory menu when nothing else is): every container and crafting-grid slot, and your own filled ones.
+---@class Window
+---@field menu string InventoryMenu when it is your own inventory.
+---@field slots WindowSlot[]
+---@field cursor? string What the cursor holds.
+---@field data integer[] The menu's numbers: progress, fuel, energy (meaning is GUI-specific; a furnace's are lit time, lit duration, cook progress, cook total).
+---@field block? Block The block whose window it is, when a click on it opened it.
+---@field put fun(self: Window, item: string, count?: integer): integer Put items of one kind from your inventory into this window: all of them, or count.
+---@field take fun(self: Window, item: string, count?: integer): integer Take items of one kind out of this window into your inventory: all of them, or count.
+---@field move fun(self: Window, from: integer, to: integer, opts?: table) Move items from slot from to slot to of this window; opts.count moves part of the stack.
+---@field quick fun(self: Window, slot: integer) Shift-click a slot of this window: its whole stack goes to the other side.
+---@field close fun(self: Window) Close this window.
+
+---@class WindowSlot
+---@field index integer What numen.gui.move and numen.gui.quick take.
+---@field side "container"|"you"|"grid"|"result"
+---@field item? string Empty slots have none.
+---@field count? integer
+---@field output? boolean A slot you only take from.

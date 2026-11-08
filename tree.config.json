@@ -1,0 +1,143 @@
+{
+  "numen": {
+    "configPath": "E:/game/HMCL/.minecraft/versions/1.21.1-NeoForge/config/numen/mcp_server.json"
+  },
+  "control": {
+    "host": "127.0.0.1",
+    "port": 8766
+  },
+  "mcp": {
+    "host": "127.0.0.1",
+    "port": 8767
+  },
+  "loop": {
+    "tickMs": 1200,
+    "eventWaitSeconds": 5,
+    "actionTimeoutMs": 240000,
+    "eventBackoffMs": 2000,
+    "eventDedupeSeconds": 20,
+    "mcpGoalStaleSeconds": 300,
+    "autoActionTimeoutSeconds": 60
+  },
+  "companions": [],
+  "idle": {
+    "enabled": false,
+    "skills": [
+      { "skill": "idle", "params": { "seconds": 20 } }
+    ],
+    "cooldownSeconds": 30
+  },
+  "leash": {
+    "enabled": true,
+    "anchor": "home",
+    "placeName": "家",
+    "maxDistance": 32,
+    "minIntervalSeconds": 15,
+    "maxIntervalSeconds": 120,
+    "escalateAfterFails": 3,
+    "haltSeconds": 180,
+    "priority": 5,
+    "skill": "approach_owner",
+    "params": { "range": 4 }
+  },
+  "places": {
+    "file": "places.json",
+    "maxEntries": 500
+  },
+  "drive": {
+    "maxSeconds": 300,
+    "maxGoals": 20,
+    "idleStopSeconds": 60,
+    "autoGraceSeconds": 20
+  },
+  "build": {
+    "maxBlocks": 64,
+    "blockBlacklist": [
+      "minecraft:lava",
+      "minecraft:flowing_lava",
+      "minecraft:water",
+      "minecraft:flowing_water",
+      "minecraft:tnt",
+      "minecraft:fire",
+      "minecraft:soul_fire",
+      "minecraft:respawn_anchor",
+      "minecraft:end_crystal",
+      "minecraft:bed",
+      "minecraft:white_bed"
+    ]
+  },
+  "trace": {
+    "dir": "logs",
+    "keepDays": 14
+  },
+  "lines": {
+    "enabled": true,
+    "dir": "lines",
+    "persona": "default",
+    "minGapSeconds": 8
+  },
+  "behavior": {
+    "mode": "survival",
+    "schedule": { "enabled": true },
+    "instinctHoldSeconds": 8,
+    "execPolicy": {
+      "enabled": true,
+      "batchMaxSeconds": 60,
+      "quietSeconds": 30,
+      "downgradeCooldownSeconds": 60,
+      "dangerHostileDistance": 16,
+      "preflight": {
+        "requireFreshMs": 3000,
+        "hostileRadius": 24,
+        "minHpPercent": 60,
+        "minHunger": 8,
+        "quietMs": 30000
+      }
+    },
+    "lockRecovery": {
+      "enabled": true,
+      "port": 8768,
+      "unlockAfterBlocked": 2,
+      "minIntervalSeconds": 30
+    },
+    "survival": {
+      "retreatHp": 8,
+      "eatHunger": 6,
+      "healHunger": 18,
+      "forageHunger": 12,
+      "fleeDistance": 16,
+      "dangerRange": 8,
+      "panicHpPercent": 65,
+      "nightGuardHpPercent": 80,
+      "nightExploreHpPercent": 80,
+      "regroupDistance": 8,
+      "maxRoamDistance": 48,
+      "forageRadius": 32,
+      "forageMax": 2,
+      "foodSearchRadius": 24,
+      "seekSeconds": 40,
+      "starvingEscalateSeconds": 180,
+      "starvingRepeatSeconds": 180,
+      "starvingHaltSeconds": 240
+    },
+    "combat": {
+      "radius": 16,
+      "attackHpPercent": 60,
+      "fleeHpPercent": 40,
+      "maxTargets": 2,
+      "noWeaponFleeDistance": 10
+    },
+    "production": {
+      "blocks": ["minecraft:oak_log", "minecraft:birch_log", "minecraft:spruce_log", "minecraft:stone"],
+      "count": 8,
+      "radius": 32
+    },
+    "escalateAfterAutoFails": 3,
+    "escalateDedupeSeconds": 300,
+    "ownerDangerRange": 24,
+    "hostileCloseRange": 6,
+    "hostileCloseHpPercent": 85,
+    "maxChunkRounds": 8,
+    "cooldowns": { "retreat": 20, "eat": 6, "forage": 15, "seekFood": 45, "regroup": 30, "fight": 10, "gather": 30 }
+  }
+}

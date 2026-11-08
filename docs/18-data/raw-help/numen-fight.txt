@@ -1,0 +1,16 @@
+---Combat: attack one entity you name. numen.fight.clear (library) fights off every hostile near you, one by one.
+---@class numen.fight
+---@field attack fun(entity: integer|Entity): Fought Attack one entity until it is dead, lost or out of reach.
+---@field clear fun(radius?: integer): integer Attack every hostile mob within radius blocks of you, nearest first, one numen.fight.attack each, until none is left.
+numen.fight = {}
+
+---What an attack did: each entity it fought and how that ended.
+---@class Fought
+---@field fought Foe[] Each entity it fought, the one you named first.
+---@field strikes integer Hits in all.
+
+---One entity an attack fought.
+---@class Foe
+---@field id integer Its runtime id.
+---@field status string defeated, lost, unreachable, refused: <why>, or pending.
+---@field strikes integer Hits it took from you.

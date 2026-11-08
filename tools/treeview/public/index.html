@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>treeview · 树监控</title>
+<style>
+  :root{
+    --bg:#070a12; --panel:rgba(14,20,34,.86); --line:rgba(120,180,255,.18);
+    --text:#dbe8ff; --dim:#7f93b8; --hot:#ffd166; --bad:#ff5d5d; --ok:#58e08f;
+    /* HUD 实测尺寸：由 app.mjs 的 ResizeObserver 写入，左右面板据此定位，别硬编码 top */
+    --top-h:56px; --legend-h:38px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:radial-gradient(1200px 700px at 50% 10%, #0d1730 0%, var(--bg) 60%);color:var(--text);font:13px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;overflow:hidden}
+  #app{position:fixed;inset:0}
+  canvas{display:block}
+  .hud{position:fixed;pointer-events:none;z-index:5}
+  /* 顶栏：允许换行（窄视口不挤压文字），z-index 高于所有面板；app.mjs 实测高度写进 --top-h */
+  .top{top:0;left:0;right:0;z-index:30;display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;padding:10px 16px;background:linear-gradient(#050912f2,#050912cc 65%,#05091200);}
+  .top>*{flex:0 0 auto}
+  .brand{font-weight:700;letter-spacing:.14em;font-size:15px;color:#9fd0ff;text-shadow:0 0 18px #2f7fff88;white-space:nowrap}
+  .pill{pointer-events:auto;border:1px solid var(--line);background:#0b1222cc;color:var(--dim);padding:3px 10px;border-radius:999px;font-size:12px;display:flex;align-items:center;gap:6px;white-space:nowrap}
+  .pill b{color:var(--text);font-weight:600}
+  .dot{width:8px;height:8px;border-radius:50%;background:#777;box-shadow:0 0 10px currentColor}
+  .pill.live .dot{background:var(--ok);color:var(--ok)}
+  .pill.offline .dot{background:#666;color:#666}
+  .pill.mock .dot{background:var(--hot);color:var(--hot)}
+  .spacer{flex:1}
+  .btn{pointer-events:auto;cursor:pointer;border:1px solid var(--line);background:#0b1222cc;color:var(--text);padding:4px 10px;border-radius:8px;font-size:12px}
+  .btn:hover{background:#14203acc}
+  /* 左右面板：顶部从实测顶栏高度之下开始，底部避开图例/提示；内部纵向滚动，永不盖住顶栏 */
+  .left{left:14px;top:calc(var(--top-h) + 10px);bottom:calc(var(--legend-h) + 18px);width:clamp(224px,26vw,300px);overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:10px;z-index:5;pointer-events:none;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#2b3d5c transparent;padding-right:2px}
+  .right{right:14px;top:calc(var(--top-h) + 10px);bottom:calc(var(--legend-h) + 18px);width:clamp(224px,30vw,344px);overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;gap:10px;z-index:5;pointer-events:none;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#2b3d5c transparent;padding-right:2px}
+  /* 只有内容溢出、需要滚轮/滚动条时才接管指针，否则空白区域不挡 3D 拖拽旋转 */
+  .left.scrollable,.right.scrollable{pointer-events:auto}
+  /* 面板是 flex 列 + 溢出滚动：卡片必须禁止收缩，否则同伴一多卡片会被压扁、内容被裁掉 */
+  .left>.card,.right>.card{flex:0 0 auto}
+  .card{pointer-events:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;backdrop-filter:blur(6px);box-shadow:0 8px 30px #0006}
+  .card h3{margin:0 0 6px;font-size:13px;display:flex;align-items:center;gap:8px}
+  .card .swatch{width:10px;height:10px;border-radius:3px;box-shadow:0 0 10px currentColor;flex:0 0 auto}
+  .kv{color:var(--dim);font-size:12px}
+  .kv b{color:var(--text);font-weight:600}
+  .plan{font-size:12px;color:#cfe2ff;margin-top:6px;padding:6px 8px;background:#0a1428;border:1px solid #1d2f4d;border-radius:8px;white-space:pre-wrap;word-break:break-all}
+  /* 同伴卡：卡头可点击折叠；卡体（HP/计划/队列）可整体收起 */
+  .card.companion{padding:0;overflow:hidden}
+  .card-head{display:flex;align-items:center;gap:8px;width:100%;margin:0;padding:8px 12px;background:none;border:0;color:var(--text);font:inherit;font-size:13px;text-align:left;cursor:pointer}
+  .card-head:hover{background:#101a2e}
+  .card-head .cname{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .card-head .csched{margin-left:auto;font-size:11px;font-weight:400;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:46%}
+  .chev{color:var(--dim);font-size:10px;transition:transform .15s;flex:0 0 auto}
+  .card.collapsed .chev{transform:rotate(-90deg)}
+  .cbody{padding:0 12px 10px;display:flex;flex-direction:column;gap:4px}
+  .card.collapsed .cbody{display:none}
+  /* 队列：限高 + 内部滚动 + 超量折叠，绝不让卡片无限拉长 */
+  .q{font-size:12px;color:var(--dim);margin-top:4px;display:flex;flex-direction:column;gap:4px;min-height:0}
+  .q-head{display:flex;align-items:center;gap:5px;color:var(--dim);white-space:nowrap;overflow:hidden}
+  .q-head b{color:var(--text)}
+  .q-run{margin-left:4px;color:var(--ok);overflow:hidden;text-overflow:ellipsis}
+  .q-list{max-height:112px;overflow-y:auto;overscroll-behavior:contain;border:1px solid #1d2f4d;background:#0a1428;border-radius:8px;padding:4px 6px;display:flex;flex-direction:column;gap:2px;scrollbar-width:thin;scrollbar-color:#2b3d5c transparent}
+  .q-item{flex:0 0 auto;display:flex;align-items:baseline;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#9fb4d8}
+  .q-item.running{color:var(--ok)}
+  .q-idx{min-width:18px;text-align:right;flex:0 0 auto;color:#4f6386;font-variant-numeric:tabular-nums}
+  .q-status{flex:0 0 auto;color:var(--dim)}
+  .q-skill{overflow:hidden;text-overflow:ellipsis}
+  .q-elide{flex:0 0 auto;color:#5f7398;text-align:center;font-size:11px;padding:2px 0}
+  .q-empty{color:#5f7398;padding:2px 0}
+  #detail .desc{font-size:12px;color:#c6d8f5;white-space:pre-wrap;word-break:break-all}
+  #detail .meta{font-size:11px;color:var(--dim);margin-top:6px}
+  .legend{left:14px;bottom:12px;max-width:calc(100vw - 28px);display:flex;gap:12px;flex-wrap:wrap;padding:8px 12px;background:var(--panel);border:1px solid var(--line);border-radius:10px;font-size:11px;color:var(--dim);z-index:6}
+  .legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;box-shadow:0 0 8px currentColor}
+  .legend .legend-hint{flex-basis:100%;color:#5f7398;font-size:10px}
+  .center-toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none;z-index:3;color:#8fa8cc;font-size:14px;letter-spacing:.08em}
+  .loading{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;z-index:4;pointer-events:none;color:#8fb8ff;font-size:15px;letter-spacing:.12em;transition:opacity .4s}
+  .loading small{color:#5f7398;font-size:12px;letter-spacing:.04em}
+  .loading.hide{opacity:0}
+  .banner{left:50%;transform:translateX(-50%);top:calc(var(--top-h) + 6px);z-index:25;font-size:12px;color:#ffb0b0;background:#2a0d0dcc;border:1px solid #ff5d5d55;padding:4px 12px;border-radius:999px;display:none;white-space:nowrap}
+  .banner.show{display:block}
+  input[type=range]{pointer-events:auto;width:110px}
+  .toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-left:auto;justify-content:flex-end}
+  .toolbar label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);white-space:nowrap}
+  /* 窄视口（如竖屏/手机）：顶栏换行、左右面板各占半屏，避免互相覆盖 */
+  @media (max-width:760px){
+    .left,.right{width:calc(50vw - 18px)}
+    .top{padding:8px 10px;gap:6px 8px}
+    .pill{padding:2px 8px}
+    .btn{padding:3px 8px}
+    .legend{gap:8px;padding:6px 8px;font-size:10px}
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="hud loading" id="loading">正在加载树结构…<small id="loadingSub">从 tools/treeview/server.mjs 读取模型</small></div>
+
+<script>
+  // 页面级错误兜底：脚本/模块加载失败时直接显示原因，别只留一个空壳
+  (function () {
+    function show(msg) {
+      var b = document.getElementById('banner');
+      var l = document.getElementById('loadingSub');
+      if (l) l.textContent = '加载失败：' + msg;
+      if (!b) return;
+      b.textContent = '页面脚本错误：' + msg;
+      b.classList.add('show');
+    }
+    window.addEventListener('error', function (e) {
+      var src = e.target && (e.target.src || e.target.href);
+      show(e.message || (src ? '加载失败 ' + src : 'unknown'));
+    }, true);
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason;
+      show(r && (r.message || r) ? String(r.message || r) : 'unknown');
+    });
+  })();
+</script>
+
+<div class="hud top">
+  <div class="brand">TREEVIEW · 树监控</div>
+  <div class="pill" id="modePill"><span class="dot"></span><span id="modeText">连接中…</span></div>
+  <div class="pill">模型 <b id="modelCounts">–</b></div>
+  <div class="pill">modelVersion <b id="modelVersion">–</b></div>
+  <div class="spacer"></div>
+  <div class="toolbar">
+    <label>路径节点数 <input id="pathN" type="range" min="3" max="8" step="1" value="3"><b id="pathNVal">3</b></label>
+    <button class="btn" id="btnReset">重置视角</button>
+    <button class="btn" id="btnLabels">标签</button>
+    <button class="btn" id="btnFail">失败标记</button>
+  </div>
+</div>
+
+<div class="hud banner" id="banner"></div>
+
+<div class="hud left" id="companions"></div>
+<div class="hud right">
+  <div class="card" id="detail">
+    <h3>节点详情</h3>
+    <div class="desc" id="detailDesc">点击/悬停节点查看说明。滚轮缩放，拖拽旋转。</div>
+    <div class="meta" id="detailMeta">treeview 只读监控 · 不改树</div>
+  </div>
+</div>
+<div class="hud legend" id="legend">
+  <span><i style="background:#ffb74d;color:#ffb74d"></i>配方</span>
+  <span><i style="background:#4fc3f7;color:#4fc3f7"></i>步骤</span>
+  <span><i style="background:#b388ff;color:#b388ff"></i>技能</span>
+  <span><i style="background:#ff5252;color:#ff5252"></i>中断</span>
+  <span><i style="background:#69f0ae;color:#69f0ae"></i>日程</span>
+  <span><i style="background:#ffd54f;color:#ffd54f"></i>合成</span>
+  <span><i style="background:#62f5ff;color:#62f5ff"></i>端口(树/游戏出入口)</span>
+  <span><i style="background:#ffcc66;color:#ffcc66"></i>核心链路</span>
+  <span style="color:#8fb8ff">— 路径色温：越新越热</span>
+  <span style="color:#ff8080">✕ 失败标记（保留到节点再次激活）</span>
+  <span class="legend-hint" id="hint">离线：树没在跑时只显示静态结构</span>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "/vendor/three/three.module.js",
+    "three/addons/controls/OrbitControls.js": "/vendor/three/OrbitControls.js"
+  }
+}
+</script>
+<script type="module" src="/app.mjs"></script>
+</body>
+</html>

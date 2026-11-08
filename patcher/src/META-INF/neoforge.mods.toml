@@ -1,0 +1,21 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+[[mods]]
+modId = "numenlockfix"
+version = "1.1.0"
+displayName = "Numen Lock Fix"
+authors = "local"
+description = '''清理 numen 在切换存档后残留的程序锁（JVM 静态 RUNNING 表）。不修改 numen 本体，删除本 jar 即回滚。'''
+[[dependencies.numenlockfix]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.233,)"
+ordering = "NONE"
+side = "BOTH"
+[[dependencies.numenlockfix]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1, 1.21.2)"
+ordering = "NONE"
+side = "BOTH"

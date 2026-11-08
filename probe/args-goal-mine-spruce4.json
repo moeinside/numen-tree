@@ -1,0 +1,1 @@
+{"companion": "bigWhale", "skill": "mine_nearby", "priority": 50, "params": {"block": "minecraft:spruce_log", "count": 4, "radius": 32, "countPerChunk": 4, "maxClusters": 2}}

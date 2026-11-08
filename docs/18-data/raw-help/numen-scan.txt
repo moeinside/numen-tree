@@ -1,0 +1,48 @@
+---Look around you: the ground map, where blocks are, who is near, one block and what it holds, whether you can see something.
+---@class numen.scan
+---@field block fun(cell: Pos): BlockInfo One block: its id and state, hardness, whether your held tool is right, dig time, whether it is in reach.
+---@field blocks fun(block_ids: string|string[], opts?: {radius?: integer}): Cluster[] Find blocks of the given types near you, as clusters of touching blocks, nearest first.
+---@field container fun(cell: Pos): Storage What a block holds — items, fluid, energy — read without opening it.
+---@field entities fun(type_filter?: "hostile"|"passive"|"player"|"item"|"all", opts?: {radius?: number}): (Entity|Item)[] List the entities near you, nearest first, with the ids other functions take.
+---@field map fun(opts?: {radius?: integer}): GroundMap A top-down map of the ground around you: where you can walk, step, drop, swim.
+---@field sight fun(target: Pos|Entity): Sight Whether you can see a cell or an entity from where you stand, and what is in the way when you cannot.
+---@field cluster fun(blocks: Block[]): Cluster A Cluster of these blocks, nearest first as you give them: its nearest is the first, its count how many.
+numen.scan = {}
+
+---One block in full: what it is and what digging it takes.
+---@class BlockInfo: Block
+---@field properties? table<string, string> Its state, facing = "north" ...
+---@field is_air boolean
+---@field is_solid boolean
+---@field is_liquid boolean
+---@field hardness number
+---@field unbreakable boolean
+---@field needs_correct_tool boolean
+---@field current_hand_correct_tool boolean
+---@field estimated_mining_ticks? integer
+---@field distance number
+---@field in_reach boolean
+
+---Touching blocks a scan found (diagonals count): every block, nearest first.
+---@class Cluster
+---@field blocks Block[] Every block of it, nearest first.
+---@field nearest Block The block nearest to where you stood.
+---@field count integer How many blocks.
+---@field filter fun(self: Cluster, keep: fun(block: Block):): Cluster The blocks of this cluster that keep(block) says yes to, as a cluster (nearest first, as before).
+---@field minus fun(self: Cluster, other: Cells|(Block|Pos)[]|Pos|Block): Cluster This cluster without the cells other has: Cells, a list of Blocks or Pos, or one Pos or Block.
+
+---@class Storage
+---@field block Block
+---@field storage string[] What it holds, one line per slot, tank or battery; empty when it exposes no storage (not a machine, tank or battery, or it keeps its state elsewhere).
+
+---A top-down map of the ground around you.
+---@class GroundMap
+---@field rows string[] The map, one string per row, north first; cells are separated by spaces.
+---@field center Pos The cell you stand in: the @.
+---@field facing string
+---@field legend string
+
+---@class Sight
+---@field visible boolean A line from your eyes reaches it.
+---@field distance number Blocks from your eyes.
+---@field blocked_by? Block When you cannot see it: the first block in the way, one to dig out before grass and the like.

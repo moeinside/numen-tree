@@ -1,0 +1,44 @@
+---Building: make the cells your hand reaches from where you stand look like Cells (numen.shape draws them) or a blueprint file. numen.build.raise (library) walks the site and builds all of it.
+---@class numen.build
+---@field blueprint fun(name: string, origin: Pos, opts?: {rotation?: integer}): Blueprint A blueprint file placed at a spot: its size, cells and materials, for numen.build.place and numen.build.diff.
+---@field diff fun(design: Cells|Blueprint): Diff What a spot still lacks to look like a design, seen from where you stand: how many cells are within reach to place, which must be dug out first, how many are out of reach and the lowest nearest of those.
+---@field place fun(design: Cells|Blueprint): Placed Make the cells of a design that your hand reaches from where you stand look like it: each such cell gets its turn once.
+---@field raise fun(building: Cells|Blueprint, opts?: table): integer Build Cells or a Blueprint (from numen.build.blueprint) until all of it went in.
+numen.build = {}
+
+---A blueprint file placed at a spot, as numen.build.blueprint returns it; numen.build.place and numen.build.diff take it. It says only which file and where: the cells stay in the file.
+---@class Blueprint
+---@field blueprint string The file.
+---@field origin Pos Where its lowest north-west corner goes.
+---@field rotation integer Degrees clockwise: 0, 90, 180 or 270.
+---@field size Pos How big the file is: x by y by z.
+---@field cells integer How many cells it has.
+---@field not_built integer Cells of the file that are liquids or blocks with no item to pay with: not built.
+---@field materials table<string, integer> Items for all of it, most first.
+---@field short_of? table<string, integer> Of those, what you are still short of, in survival; empty means you carry enough.
+
+---What a spot still lacks to look like a design, seen from where you stand.
+---@class Diff
+---@field left integer Cells still to do.
+---@field reach integer Within reach to place now.
+---@field dig Pos[] Up to 16 cells holding another block to dig out first, nearest first.
+---@field far integer Out of reach.
+---@field next? Pos The lowest, then nearest, of those out of reach: numen.move.to(d.next, {arrive = "place"}) gets within reach of it.
+---@field no_stock integer Cells holding another block with nothing of yours to put there.
+---@field unheld integer Cells that would not stay put yet: what holds them (the block below, the wall behind) is not built.
+---@field skipped integer Cells that differ and that you leave alone.
+
+---What one numen.build.place did.
+---@class Placed
+---@field requested integer Cells it was given to do.
+---@field left integer Cells still to do.
+---@field completed integer Cells that now match.
+---@field placed integer Blocks placed.
+---@field replaced integer Blocks that stood there and were swapped for the right one.
+---@field cleared integer Blocks broken to clear a cell that should be empty.
+---@field removed integer Blocks you placed there before that the file no longer has, taken away.
+---@field building? string The building's name, house#1, for a blueprint.
+---@field site? Pos[] Two corners of the site.
+---@field destroyed_while_building? integer Cells something else broke while you built, put back.
+---@field settled_away? integer When the last cell went in: cells that changed once the world settled (vanilla would not hold them as drawn, or their neighbours reshape them).
+---@field still_short? string What you are short of.

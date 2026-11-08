@@ -1,0 +1,23 @@
+---The background task and your pending timers.
+---@class numen.task
+---@field status fun(): Status What you have in flight: the background task and your pending timers.
+---@field stop fun(opts?: {task_id?: string}): Stopped Cancel the background task, or a task or timer by its id.
+---@field timer fun(reason: string, opts?: {after?: integer}): Timer Set a one-shot reminder that fires after a delay in world time.
+numen.task = {}
+
+---@class Status
+---@field task_id? string The background task, when there is one.
+---@field task? string Its function, numen.move.go.
+---@field state? "running"|"queued"
+---@field elapsed_s? integer
+---@field budget_left_s? integer
+---@field timers Timer[] Your pending timers.
+
+---@class Timer
+---@field timer_id string
+---@field remaining_s integer Seconds of world time until it fires.
+---@field reason string
+
+---@class Stopped
+---@field task_id? string The task it stopped.
+---@field timer_id? string The timer it cancelled.

@@ -1,0 +1,4 @@
+---The API itself: the typed signatures of a group's or a module's functions, or one function in full.
+---@class numen.api
+---@field help fun(name: string): string The help of a function (its signature, every argument, what it returns, examples, notes) or of a group or module (one typed line per function), as text.
+numen.api = {}

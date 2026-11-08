@@ -1,0 +1,226 @@
+[
+  {
+    "layer": "mcp",
+    "name": "list_companions",
+    "description": "List the owner's live Minecraft companions (name + id). Call this first to see who you can drive.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "create_companion",
+    "description": "Summon a new companion into the world by name (3–16 letters, digits, or underscore). It arrives in a moment; call list_companions to confirm, then drive it directly — no 'take control' step.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The new companion's name (3–16 letters, digits, or underscore)."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "delete_companion",
+    "description": "Permanently dismiss a companion — it drops its inventory, armor and accessories and is gone for good. Takes its name or id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companion": {
+          "type": "string",
+          "description": "Which companion to dismiss — its name or id (see list_companions)."
+        }
+      },
+      "required": [
+        "companion"
+      ]
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "get_events",
+    "description": "Long-poll the companion's inbox: returns the moment something urgent arrives (the owner speaking to it shows up as a <query>; world happenings as <event>s), or whatever accumulated once wait_seconds runs out. Events are consumed on read and nothing is lost between calls — call this about every 2 seconds while you drive the companion.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companion": {
+          "type": "string",
+          "description": "Which companion to act with — its name or id (see list_companions)."
+        },
+        "wait_seconds": {
+          "type": "integer",
+          "description": "How long to wait for something urgent before returning, in seconds (0–50, default 2). 0 = return at once. Leave it unset for the normal drive loop; raise it only to park and wait for the owner."
+        }
+      },
+      "required": [
+        "companion"
+      ]
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "say",
+    "description": "Speak as the companion: the text appears in-game as its chat line, speech bubble, and voice (if one is bound). Use it to answer the owner's <query> events and to narrate what you are doing. Consecutive calls queue up and play in order.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "companion": {
+          "type": "string",
+          "description": "Which companion to act with — its name or id (see list_companions)."
+        },
+        "text": {
+          "type": "string",
+          "description": "What the companion says out loud."
+        }
+      },
+      "required": [
+        "companion",
+        "text"
+      ]
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "lua",
+    "description": "Runs a Lua 5.2 program that acts through your API, and returns one receipt when it ends. This is how you do anything in the world: every function is listed in <api>. - Every API function is written in full, `namespace.group.verb(objects..., {option = value})`: Numen's own are under numen (`numen.scan.blocks(\"iron_ore\", {radius = 12})`, `numen.work.dig({x = 120, y = 12, z = -35})`), a mod's under …",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "The program."
+        },
+        "companion": {
+          "type": "string",
+          "description": "Which companion to act with — its name or id (see list_companions)."
+        }
+      },
+      "required": [
+        "code",
+        "companion"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "skill",
+    "description": "Loads a skill — the detailed workflow for one kind of task — and returns its instructions as this call's result. - <available_skills> in the system prompt lists each skill and what it is for. When a task you are asked to do matches one, load it before you start on the task, then follow it. - A loaded skill is a <skill_content name=\"…\"> block in the conversation, whether this tool or your owner's …",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "skill": {
+          "type": "string",
+          "description": "The skill's name, as <available_skills> lists it."
+        },
+        "file": {
+          "type": "string",
+          "description": "Relative path of a supporting file the skill's text names, e.g. references/baroque.md. Omit to load the skill's own text."
+        },
+        "page": {
+          "type": "integer",
+          "description": "Which page of a long text. Omit for the first.",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "companion": {
+          "type": "string",
+          "description": "Which companion to act with — its name or id (see list_companions)."
+        }
+      },
+      "required": [
+        "skill",
+        "companion"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "todo",
+    "description": "Writes down your plan for work of several physical phases; your owner sees it as a checklist. Each call gives the whole plan and replaces the one before. - Write it before the first physical step, and again right after each verified result to mark the finished step [x] and move exactly one step to [>]. While work remains exactly one step is [>]. - Skip it for single actions and chat. - Never mark…",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "description": "The whole plan, one string per step in order, each starting with its mark: [ ] to do, [>] doing now, [x] done, [-] dropped.",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "companion": {
+          "type": "string",
+          "description": "Which companion to act with — its name or id (see list_companions)."
+        }
+      },
+      "required": [
+        "items",
+        "companion"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "layer": "mcp",
+    "name": "memory",
+    "description": "Keeps your own notes, which outlive this session; their index comes to you as <memory> every turn. - command \"remember\" writes one note: description is the line you will see in <memory>, the fact itself (\"main base -340,68,120\"), not a label; name is its handle (writing a name again replaces that note); content is a longer body, only when there is more worth reading later. - command \"recall\" read…",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "What to do: remember, recall or forget.",
+          "enum": [
+            "remember",
+            "recall",
+            "forget"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "description": "The note's handle, short kebab-case like main-base. remember: omit it to get the next free note-1, note-2, …; recall and forget: the name exactly as <memory> lists it."
+        },
+        "description": {
+          "type": "string",
+          "description": "remember: the one line you will see in <memory>."
+        },
+        "type": {
+          "type": "string",
+          "description": "remember: owner = the owner's habits and wishes, world = places and things you have seen, lesson = something you tried that did not work. Omit to file it as world.",
+          "enum": [
+            "owner",
+            "world",
+            "lesson"
+          ]
+        },
+        "content": {
+          "type": "string",
+          "description": "remember: a longer body, read back with recall. Omit to keep just the line."
+        },
+        "page": {
+          "type": "integer",
+          "description": "recall: which page of a long body. Omit for the first.",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "companion": {
+          "type": "string",
+          "description": "Which companion to act with — its name or id (see list_companions)."
+        }
+      },
+      "required": [
+        "command",
+        "companion"
+      ],
+      "additionalProperties": false
+    }
+  }
+]

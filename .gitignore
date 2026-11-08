@@ -1,0 +1,23 @@
+# ── 运行时产物 ──
+logs/
+places.json
+*.log
+
+# ── 依赖 / 构建产物 ──
+node_modules/
+npm-debug.log*
+
+# mod 补丁的构建中间物与 jar（源码在 patcher/src，用 patcher/build.ps1 重建）
+patcher/build/
+
+# ── 编辑器 / 系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 本地私有配置（如有）──
+.env
+.env.*
+*.local.json

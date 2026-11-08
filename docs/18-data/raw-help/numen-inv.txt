@@ -1,0 +1,48 @@
+---Your inventory: what you carry, recipes, crafting, eating, dropping.
+---@class numen.inv
+---@field count fun(item: string): integer How many of one item you carry in your backpack.
+---@field craft fun(recipe: string, opts?: {count?: integer}): Crafted Craft once in the crafting grid you have open: lay one recipe into it and take the result.
+---@field craftable fun(): Recipe[] Every crafting recipe you can craft right now from what you carry.
+---@field drop fun(item: string, opts?: {count?: integer}): Dropped Drop items from your inventory on the ground in front of you.
+---@field eat fun(item: string): Ate Eat or drink something from your inventory.
+---@field items fun(): Stack[] What you carry in your backpack, one entry per kind of item.
+---@field recipes fun(item: string): Recipe[] How an item is made, like JEI: every recipe that outputs it, at every station.
+---@field make fun(item: string, count?: integer): integer Make count of item (default 1): pick a crafting recipe you have the materials for (numen.inv.recipes), and craft it with numen.inv.craft until there are enough.
+---@field store fun(at: Pos|Block, item: string, count?: integer): integer Walk to a container (a chest, a barrel …), open it, put count of item in (all you carry by default) and close it.
+---@field fetch fun(at: Pos|Block, item: string, count?: integer): integer Walk to a container, open it, take count of item out (all it holds by default) and close it.
+---@field smelt fun(furnace: Pos|Block, item: string, count?: integer, opts?: {fuel?: string, timeout?: number}): integer Smelt count of item (all you carry by default) in a furnace, blast furnace or smoker: walk to it, put the item in and opts.fuel (default minecraft:coal, one per 8 items), stand by until the input is used up and nothing is cooking (numen.time.wait_until, opts.timeout seconds, default 12 per item), take every output out and close it.
+---@field give fun(target: Entity|Pos, item: string, count?: integer): integer Give count of item (all you carry by default) to a player or another entity: walk within 2 blocks of them (numen.move.to with arrive "near") and drop it there for them to pick up.
+numen.inv = {}
+
+---What one craft made.
+---@class Crafted
+---@field crafted integer How many it made.
+---@field carrying integer How many you carry now.
+---@field used string[] What it used, 3x oak_planks.
+---@field got_back string[] What came back, a bucket from milk.
+---@field more boolean Whether what you carry crafts more of it: call again for the rest.
+
+---One way to make an item, like a page of JEI.
+---@class Recipe
+---@field id string The recipe's id; numen.inv.craft takes it.
+---@field station "crafting"|"smelting"|"blasting"|"smoking"|"campfire"|"stonecutter"|"smithing" Where it is made.
+---@field item string What it makes.
+---@field makes integer How many one craft makes.
+---@field ingredients string[] One entry per filled cell: an item, or planks(any) for any of a kind.
+---@field grid? integer Crafting only: the smallest grid it fits, 2 (your own) or 3 (a crafting table); 0 needs a modded station.
+---@field missing? string[] Crafting only: what you are short of to craft it once, 3x iron_ingot (have 1); absent when you have it all.
+---@field ticks? integer Cooking only: how long one item takes.
+
+---@class Dropped
+---@field item string
+---@field dropped integer
+---@field remaining_in_inventory integer
+
+---@class Ate
+---@field item string
+---@field hp number
+---@field hunger integer
+
+---@class Stack
+---@field item string The item id, minecraft:cobblestone.
+---@field count integer How many you carry, all stacks together.

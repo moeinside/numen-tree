@@ -1,0 +1,1 @@
+{"companion": "bigWhale", "skill": "dig_cells", "priority": 50, "params": {"walk": false, "collect": true, "cells": [{"x": -52, "y": 67, "z": 103}]}}

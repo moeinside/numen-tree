@@ -1,0 +1,9 @@
+---Minecraft and mod commands, as a player types them in chat, with your own permission level.
+---@class numen.mc
+---@field run fun(command: string): Ran Run one Minecraft or mod command and return what it said.
+numen.mc = {}
+
+---@class Ran
+---@field command string The command as it ran, with its /.
+---@field output string[] What it said, line by line.
+---@field result integer The number the command returned.
