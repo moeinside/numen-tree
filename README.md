@@ -1,147 +1,154 @@
 # Numen 脑树（numen-tree）
 
-> 仓库：<https://github.com/moeinside/numen-tree> · Git 用法速查见 [docs/21-Git与GitHub上手.md](docs/21-Git与GitHub上手.md)
+> 以下说明由大肥鲸自动生成，可能与实际行为有出入，一切以源码为准。
 
-给 Minecraft 里的 Numen 同伴加一层**常驻的自动执行层**，让 LLM 从"逐步微操"退回"只下目标"。
+给 Minecraft 里的 Numen 同伴加一层**常驻的自动执行层**：LLM 只下目标，树负责查表执行、仲裁、上报。
+一句话：**LLM 当指挥官，树当小脑，numen 自己的身体和反射照旧。**
 
-> 一句话：**LLM 当指挥官，树当小脑，numen 的身体和反射照旧。**
-
-**接手请先读 👉 [docs/09-交接-2026-11-07.md](docs/09-交接-2026-11-07.md)**（现状、下一步、坑）
-
----
-
-## 1. 一句话现状
-
-树进程能跑：下目标 → 执行 → 上报；M1 起支持**意图 → 计划 → 分步执行 → 阶段上报**（配方表 + 中断表 + 恢复表，加行为只加数据）。
-支持 **survival / production / combat** 三种模式（按同伴独立切换）和**多同伴并发**；LLM 通过 10 个 MCP 工具指挥（含地点簿 `tree_place`、计划任务 `tree_task`），不直接写 Lua。
+仓库 <https://github.com/moeinside/numen-tree> · MIT 许可证 · 文档全在 [`docs/`](docs/)
 
 ---
 
-## 2. 五分钟上手
+## 1. 需要什么
 
-前置：游戏已启动（numen MCP 在 `127.0.0.1:8765`），至少一个同伴在线。
+| 组件 | 版本 | 说明 |
+|---|---|---|
+| **Minecraft** | **1.21.1** | 只支持这一个版本 |
+| **NeoForge** | **21.1.265** | 最低 21.1.233 |
+| **numen** | **0.1.4.1** | 同伴本体，`numen-neoforge-1.21.1-0.1.4.1.jar` |
+| **numenlockfix** | **1.1.0** | 本仓库附带：[`mods/numenlockfix-1.1.0.jar`](mods/)。**必需**，见下 |
+| **Node.js** | 18+（实测 v24.14） | 跑树进程 |
+| JDK 21 | 仅重新编译补丁时需要 | 日常使用不需要 |
+
+**为什么 numenlockfix 是必须的**：numen 用一张 JVM 静态表记录"哪个同伴正在跑程序"，切存档、树被杀、同伴死亡都会留下永远清不掉的锁 —— 表现是同一条命令反复被拒、同伴不听指挥，只能重建。这个补丁在启动/死亡时清表，并开一个 `127.0.0.1:8768` 本地端口给树用来自动解锁。它**不改 numen 本体**，删掉 jar 即完全回滚。详见 [mods/README.md](mods/README.md)。
+
+---
+
+## 2. 安装
+
+**第一步：装 mod**（HMCL 版本隔离下的路径）
+
+```
+E:\game\HMCL\.minecraft\versions\1.21.1-NeoForge\mods\
+├─ numen-neoforge-1.21.1-0.1.4.1.jar   ← numen 本体
+└─ numenlockfix-1.1.0.jar              ← 本仓库 mods/ 里拿
+```
+
+放好后**重启游戏**（mod 只在启动时加载）。日志里能看到 `[numenlockfix] v1.1.0 加载`。
+
+**第二步：确认前置**
+
+- 进存档，至少有一个 numen 同伴在线；
+- numen 的 MCP 服务在 `127.0.0.1:8765`。
+
+**第三步：起树**
 
 ```powershell
 cd E:\game\HMCL\numen-tree
+node src/daemon.mjs          # 或双击 启动树进程.bat（会自动处理端口冲突）
+```
 
-# 1) 起树（双击 启动树进程.bat 也可以）
-node src/daemon.mjs
+---
 
-# 2) 看状态
-node src/cli.mjs status          # 同伴在哪/在干什么/当前技能已运行秒数/上一步
-node src/cli.mjs skills          # 16 个技能卡
-node src/cli.mjs lines           # 台词库
-node src/cli.mjs inbox --brain   # ★ 需要大脑决策的上报
+## 3. 使用方法
 
-# 3) 下目标
+```powershell
+# 看状态：同伴在哪、在干什么、当前技能跑了多久
+node src/cli.mjs status
+
+# 技能卡列表（当前 25 个，加文件即扩展）
+node src/cli.mjs skills
+
+# 下目标（目标 = 技能 + 参数，树自己执行到结束）
 node src/cli.mjs goal --companion tyrander --skill go_to --params-file probe\params-arrive.json
 
-# 4) 切模式 / 暂停 / 清队列
-node src/cli.mjs control --companion tyrander --op mode --mode production
-node src/cli.mjs control --companion tyrander --op pause
-node src/cli.mjs control --companion tyrander --op clear
+# 自然语言任务（M1 计划层：意图 → 配方 → 分步执行 → 阶段上报）
+node src/cli.mjs task --companion tyrander --intent "把木头存了"
+node src/cli.mjs task --companion tyrander --intent "回家过夜" --deadline 300
 
-# 5) 地点簿（死亡点自动记；家/基地/矿洞手动记）
+# 模式切换（每个同伴独立：survival / production / combat）
+node src/cli.mjs control --companion tyrander --op mode --mode production
+
+# 暂停 / 清队列 / 热重载技能卡 / 优雅退出（别用 taskkill，会留僵尸锁）
+node src/cli.mjs control --op pause
+node src/cli.mjs control --op clear
+node src/cli.mjs control --op reload-skills
+node src/cli.mjs control --op exit
+
+# 地点簿（死亡点自动记；家/基地手动记）
 node src/cli.mjs place list
 node src/cli.mjs place record --name 家 --pos here --note 主人脚下的基地
 node src/cli.mjs place find --query "上次死的地方"
 
-# 6) 计划任务（M1：模糊意图 → 配方 → 分步执行）
-node src/cli.mjs task --companion tyrander --intent "把木头存了"
-node src/cli.mjs task --companion tyrander --intent "回家过夜" --deadline 300
-node src/cli.mjs status          # 会显示"计划 X 第 N/共 M 步（当前步 Y）"
+# 锁：查 / 清单个 / 清全部（numenlockfix 提供能力，树侧自动清锁默认开启）
+node src/cli.mjs lock
+node src/cli.mjs lock --companion helper
+node src/cli.mjs lock --all
 
-# 7) 离线回放测试（不开游戏）
+# 看上报（需要大脑决策的事件）
+node src/cli.mjs inbox --brain
+
+# 不开游戏的离线回放测试
 node probe/replay.mjs
-
-# 8) 改完技能卡热重载 / 优雅退出（不要 taskkill，会留僵尸锁）
-node src/cli.mjs control --op reload-skills
-node src/cli.mjs control --op exit
 ```
+
+树对 LLM 的 10 个 MCP 工具（`tree_goal` / `tree_task` / `tree_place` / `tree_control` 等）见 [docs/05-接口契约.md](docs/05-接口契约.md)。
+
+### 端口
 
 | 端口 | 用途 |
 |---|---|
-| 8765 | numen 的 MCP（游戏内） |
+| 8765 | numen 的 MCP（游戏内提供） |
 | 8766 | 树的控制 API（CLI 用） |
 | 8767 | 树对 LLM 的 MCP 工具面 |
+| 8768 | numenlockfix 本地清锁端口 |
+
+所有参数（阈值、冷却、牵引绳、模式参数）都在 [`tree.config.json`](tree.config.json)。
 
 ---
 
-## 3. 目录
+## 4. 目录
 
 ```
 numen-tree/
-├─ README.md                  ← 本文件
-├─ 启动树进程.bat             双击起树（自动处理端口冲突）
-├─ tree.config.json           所有可调参数
-├─ docs/
-│  ├─ 01-需求与架构.md         分层、数据流、执行模型、牵引绳、三模式
-│  ├─ 02-探针记录.md           mod 内部结构、实测数据、僵尸锁分析
-│  ├─ 03-维护手册.md           环境、启停、故障处置、变更记录
-│  ├─ 04-可扩展性设计.md       技能卡 / Lua 模块 / NumenPlugin 三层扩展点
-│  ├─ 05-接口契约.md           9 个 MCP 工具、上报格式、技能契约、地点簿
-│  ├─ 06-路线图.md             阶段与状态
-│  ├─ 07-DSH配置变更记录.md    所有项目外改动 + 回滚方式
-│  ├─ 08-试验记录-三模式与多同伴.md
-│  ├─ 09-交接-2026-11-07.md    ★ 交接快照
-│  ├─ 10-numen-Lua-API速查.md  ★ Lua API 全签名 + 实测坑
-│  ├─ 11-行为树打磨记录-2026-11-07晚.md  ★ 规则表/觅食/战斗/地点簿/踩坑
-│  ├─ 12-全功能树设计-M1.md    ★ 计划层/配方/中断/恢复表 + 验收
-│  ├─ 13-Windows-PowerShell踩坑总表.md  ★ 本机 PowerShell 坑速查
-│  └─ 14-交接-2026-11-08.md    ★★ 新会话先读这份
-├─ places.json                地点簿（死亡点/基地/自定义地点，运行时生成）
-├─ src/
-│  ├─ daemon.mjs              编排 + 控制 API（含 /places）+ 动态发现同伴
-│  ├─ lane.mjs                每同伴一条执行通道（观测/仲裁/执行/事件）
-│  ├─ numen.mjs               numen MCP 客户端 + 回执解析
-│  ├─ state.mjs               黑板 / 目标栈 / 收件箱
-│  ├─ places.mjs              地点簿：持久化 + 模糊解析
-│  ├─ lines.mjs               台词库（纯数据+机械选择）
-│  ├─ mcpserver.mjs           对 LLM 的 9 个工具
-│  ├─ trace.mjs               jsonl 留痕
-│  └─ skills/                 16 个技能卡（自动发现，加文件即扩展）
-├─ lines/                     台词库数据（default.json + 人设覆盖）
-├─ patcher/                   僵尸锁补丁 mod（numenlockfix）
-├─ probe/                     探针脚本（只读为主）
-└─ logs/                      trace-YYYYMMDD.jsonl
+├─ src/         树本体：编排、执行通道、黑板、计划层、技能卡、地点簿、MCP 工具面
+├─ mods/        numenlockfix 补丁 jar（必需）+ 说明
+├─ patcher/     补丁源码（Java），需要改才动；产物已随 mods/ 提供
+├─ probe/       探针脚本 + 离线回放测试（不开游戏也能跑）
+├─ tools/       能力审计工具 + 实时树图可视化（treeview）
+├─ lines/       台词库数据
+├─ docs/        架构、接口契约、维护手册、交接记录、Lua API 速查
+├─ tree.config.json   所有可调参数
+└─ 启动树进程.bat / 启动树监控.bat
 ```
 
+**不随仓库提供**（运行时产物，已写进 `.gitignore`）：`logs/`（trace 日志）、`places.json`（地点簿，跟存档走）、`patcher/build/`、`node_modules/`。
+
 ---
 
-## 4. 名词表
+## 5. 文档索引
 
-| 词 | 含义 |
+新接手先读 **[docs/14-交接-2026-11-08.md](docs/14-交接-2026-11-08.md)**。
+
+| 文档 | 内容 |
 |---|---|
-| **大脑** | 常驻的 LLM 会话（DSH）。定目标、说话、处理异常 |
-| **右脑** | 一次性子 agent。无状态、纯推理、只返回数据（尚未实现） |
-| **树 / 小脑** | 常驻外部进程。查表执行、仲裁、目标栈、哨兵、trace |
-| **脊髓** | mod 内置反射（逃跑、脱困、落地缓冲），不经树 |
-| **同伴** | Numen 的 NPC 实体，各自有独立 Lua 执行槽 |
-| **技能卡** | 树里一个可执行技能：`can_start` / 执行 / 失败码 |
-| **宏计划** | 几个技能卡的固化组合（尚未实现） |
-| **模式** | survival / production / combat，按同伴独立 |
-| **牵引绳** | 离主人太远自动往回走 |
-| **台词库** | 机械播报用的数据表，运行时只查表不生成 |
-| **唤醒源** | 允许把 LLM 叫醒的封闭事件清单 |
+| [docs/01-需求与架构.md](docs/01-需求与架构.md) | 分层、数据流、执行模型、三模式 |
+| [docs/05-接口契约.md](docs/05-接口契约.md) | MCP 工具、上报格式、技能契约 |
+| [docs/10-numen-Lua-API速查.md](docs/10-numen-Lua-API速查.md) | numen 的 Lua API 全签名 + 实测坑 |
+| [docs/12-全功能树设计-M1.md](docs/12-全功能树设计-M1.md) | 计划层、配方表、中断/恢复表 |
+| [docs/13-Windows-PowerShell踩坑总表.md](docs/13-Windows-PowerShell踩坑总表.md) | 本机 PowerShell 坑 |
+| [docs/21-Git与GitHub上手.md](docs/21-Git与GitHub上手.md) | 不会 Git 就看这篇 |
+| [mods/README.md](mods/README.md) | numenlockfix 安装/卸载/验证 |
+| [patcher/README.md](patcher/README.md) | 补丁原理、构建、风险 |
 
 ---
 
-## 5. 三条硬边界
+## 6. 三条硬边界
 
-| 边界 | 说明 |
-|---|---|
-| **不动 numen 本体** | 不反编译、不改它的文件。唯一例外：僵尸锁补丁 mod（独立 jar，删掉即回滚） |
-| **一个同伴同一时间只被一个驱动者** | 单 Lua 程序槽，双开会互相锁死 |
-| **树不做判断** | 查表 + 固定规则；语言只查表不生成；对话归 LLM |
+1. **不动 numen 本体** —— 不反编译、不改它的文件；唯一例外是独立的僵尸锁补丁，删 jar 即回滚。
+2. **一个同伴同一时间只被一个驱动者控制** —— 单 Lua 程序槽，双开会互相锁死。
+3. **树不做判断** —— 查表 + 固定规则，语言只查表不生成，对话归 LLM。
 
----
+## 7. 许可
 
-## 6. 设计原则（摘要，全文见 docs/01）
-
-1. 树是"自动"不是"自主"。
-2. LLM 只有目标权/否决权/时间权，没有逐步指挥权。
-3. 树掌握节拍，永不等 LLM。
-4. 下行写目标、上行读事件，两条单向通道。
-5. 汇报 = 分类 + 事实，不给建议。
-6. 报了 = 已停手等你；只有求助推，其余拉。
-7. 贵的思考外包给右脑，结果沉淀成宏计划（待做）。
+[MIT](LICENSE)。第三方 mod（numen、NeoForge、Minecraft）版权归各自作者。
