@@ -7,6 +7,7 @@ import {
   createExecState,
   describeExec,
   evaluateMode,
+  isLongSkill,
   noteInterrupt,
   noteObservation,
   noteRisk,
@@ -166,6 +167,13 @@ console.log('postflight：');
   );
   check('位置异常跳变 → 标记风险', !r.ok && r.reasons.includes('pos_jump'));
 }
+
+console.log('执行闸门名单：');
+check('craft 是长技能', isLongSkill('craft'));
+check('mine_nearby 是长技能', isLongSkill('mine_nearby'));
+check('eat 不是长技能', !isLongSkill('eat'));
+check('equip 不是长技能', !isLongSkill('equip'));
+check('未知技能默认不算长技能', !isLongSkill('whatever'));
 
 console.log('');
 console.log(`执行策略自测：${pass}/${pass + fail} 通过`);

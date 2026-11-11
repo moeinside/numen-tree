@@ -254,6 +254,8 @@ export function planView(plan) {
     steps_done: index,
     steps_total: total,
     suspendedBy: plan.suspendedBy,
+    gateReason: plan.gateReason ?? null,
+    gateMode: plan.gateMode ?? null,
     visits: plan.visits,
     startedAt: plan.startedAt,
     deadlineAt: plan.deadlineAt,

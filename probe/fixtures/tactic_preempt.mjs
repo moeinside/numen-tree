@@ -19,6 +19,7 @@ export default {
       skill: 'tactic',
       params: { tactic: 'move_segment', params: { target: { x: 100, y: 64, z: -40 }, arrive: 2 } },
       priority: 40, // P3 级：低于 near_death(95)
+      priorityClass: 'P3',
       note: 'mcp',
     });
     ctx.lane.state.pushGoal(ctx.evidence.tacticGoal);

@@ -115,10 +115,16 @@ local taken = 0           -- take 自报的个数（背包前后差读不到时�
 local sawItem = false     -- 是否有容器里确实有该物品
 local takeFail = nil      -- 取失败原文
 local openFails = {}      -- 开窗/移动失败原文（失败时带出去）
+local alreadyHave = false
 
 local ok, r = pcall(function()
   if ITEM == nil or ITEM == "" then
     error({ kind = "bad_argument", message = "item is required", hint = "示例 minecraft:oak_log" })
+  end
+  local have = numen.inv.count(ITEM)
+  if type(have) == "number" and have > 0 and (WANT == nil or have >= WANT) then
+    alreadyHave = true
+    return { before = have }
   end
   local ats = findContainers(RADIUS)
   if #ats == 0 then
@@ -130,6 +136,20 @@ local ok, r = pcall(function()
   local bOk, before = pcall(numen.inv.count, ITEM)
   if not bOk or type(before) ~= "number" then before = 0 end
 
+  -- 开箱：准星被挡时不要长时间挖墙，直接返回 chest_blocked，让树短报玩家清理
+  local function openAt(at)
+    local useOk, useRes = pcall(numen.use.block, at)
+    if not useOk then return nil, tostring(useRes) end
+    if type(useRes) == "table" and useRes.slots and #useRes.slots > 0 then
+      return useRes, nil
+    end
+    local bp = type(useRes) == "table" and useRes.block and useRes.block.pos or nil
+    if bp then
+      return nil, string.format("chest_blocked at %d,%d,%d", bp.x, bp.y, bp.z)
+    end
+    return nil, "no window slots"
+  end
+
   for _, at in ipairs(ats) do
     -- 指定了 count 且已经取够，就不用再开下一个容器
     if WANT ~= nil and taken >= WANT then break end
@@ -140,17 +160,21 @@ local ok, r = pcall(function()
     if not mvOk then
       openErr = "move: " .. tostring(mvRes)
     else
-      local useOk, useRes = pcall(numen.use.block, at)
-      if not useOk then
-        openErr = tostring(useRes)
-      elseif type(useRes) ~= "table" or not useRes.slots or #useRes.slots == 0 then
-        openErr = "no window slots"
-      else
-        w = useRes
-      end
+      w, openErr = openAt(at)
     end
 
     if openErr ~= nil then
+      -- 自研开窗失败（常见：准星被挡/no window slots）→ 退 numen.inv.fetch 原生“走近+开箱+取出+关箱”
+      local fOk, fRes = pcall(numen.inv.fetch, at, ITEM, WANT)
+      local got = fOk and (tonumber(fRes) or 0) or 0
+      if got > 0 then
+        taken = taken + got
+        sawItem = true
+        opened = true
+        openedAny = true
+        takenAt = at
+        break
+      end
       openFails[#openFails + 1] = openErr
     else
       opened = true
@@ -233,6 +257,14 @@ end)
 -- 关窗收尾（正常路径已经关过，这里只兜底；close 对没开的窗口返回 false，不会出错）
 if opened then pcall(numen.gui.close) end
 if not ok then return FAIL(r) end
+if alreadyHave then
+  return J({
+    { "got", N(0) },
+    { "item", S(ITEM) },
+    { "left", N(0) },
+    { "already", "true" },
+  })
+end
 
 -- 实际进包数量以背包前后差为准；读不到就退回 take 自报的个数
 local aOk, after = pcall(numen.inv.count, ITEM)

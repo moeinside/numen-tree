@@ -110,6 +110,29 @@ tools/treeview/
 
 `companions[]` 关键字段（来自树 state.snapshot）：`name/id/pos/hp/hunger/schedule/plan{recipeId,cursor,status,steps_done,steps_total}/goals[]/current{skill}/lastAction{skill,ok}`。
 
+**优先度调度字段（2026-11-09 追加，只读展示）**，同样来自 `state.snapshot()`：
+
+```jsonc
+{
+  "timePhase": "dawn|morning|noon|afternoon|dusk|night|midnight",
+  "intentState": {
+    "at": "ISO",
+    "current": { "goalId":"g1", "need":"food_low", "intent":"secure_food", "priority":62, "status":"running" }
+              // 或计划：{ planId, recipeId, intent, source, priority:null, status }
+              // 或 null
+    "candidates": [ { "need":"food_low", "intent":"secure_food", "strategy":"secure_food", "priority":62, "switchCost":5 } ]
+  },
+  "drives": { "hunger":0.17, "fatigue":0.5, "safety":0, "resource":0.3, "satiation":{} }, // 0~1
+  "attention": { "salience":{...}, "focus":"secure_food", "captured":null /* 或 {kind,salience} */ },
+  "instinct": { "active":false, "kind":null, "priority":0, "reason":null },
+  "learning": { "updatedAt":"ISO|null", "strategies":{ "secure_food":{ "attempts":5,"success":3,"fail":2,"successRate":0.6,"ewmaSuccess":0.58,"bonus":1,"lastKind":null } } },
+  "helpNeeded": { "kind":"need_gear", "message":"...", "hint":"需要玩家做什么", "at":"ISO" } // 或 null
+}
+```
+
+> ⚠️ 这些字段由 `src/state.mjs snapshot()` 生成，**树进程启动时才加载**。只改 `state.mjs` 不重启树的话，运行中的树仍上报旧 snapshot（treeview HUD 会显示"未上报/需树重启生效"）；treeview 不做任何热重载/重启树的动作。
+> `drives/learning` 在 snapshot 内用 `describeDrives()/describeLearning()` 做只读视图，不参与决策。
+
 ---
 
 ## 5. 前端实现要点（`public/app.mjs`）
@@ -127,6 +150,8 @@ tools/treeview/
 - **同伴卡（`renderCards()`）**：增量更新——卡片 DOM 只创建一次，之后只改文本/属性；因此队列滚动位置、折叠状态在 1s 轮询间不会丢。
   - 卡头（`.card-head`）点击折叠/展开，状态存 `state.cardCollapsed`；同伴数 > `CARD_AUTO_COLLAPSE_OVER`（3）时新卡片默认折叠；`.left` 自身纵向滚动，同伴再多也只是左栏滚动。
   - 队列有界：`queueItems()` 最多渲染 `CARD_QUEUE_RENDER_MAX`（60）条（超量 = 40 条队首 + "… 省略 N 项 …" + 12 条队尾），`.q-list{max-height:112px}` 内部滚动；**滚动容器是 flex 列时子项必须 `flex:0 0 auto`**，否则会被压缩成 0 高（表现为队列一片空白）。
+- **优先度调度面板（`renderSched()`，在 `renderCards()` 内调用）**：同伴卡内新增 `.sched` 区块，显示 `timePhase`、`intentState.current`（需求/计划 + priority/status）、`intentState.candidates` 前 3（need/intent/priority/switchCost）、`drives` 四小条（0~1 → 百分比/颜色）、`attention.focus/captured`、`instinct.active/kind`、当前策略的窄学习 `attempts/successRate/bonus`、`helpNeeded` 求助短报。数据缺失时显示"未上报"，不抛错；原有卡头日程（`schedule.id`）、计划、队列保持不变。
+- **空闲自动旋转**：`worldGroup` 是树的主体父 group（`treeGroup` + 所有同伴路径/标记/名字都挂在它下面）。监听 `pointermove/pointerdown/mousedown/wheel/touchstart/touchmove/keydown` 重置 9s 空闲计时；空闲后 `worldGroup.rotation.y += 0.08rad/s`（约 78s/圈），任意操作立刻停。**旋转的是世界 group，不是相机/`controls.autoRotate`**，所以不与 OrbitControls 打架。路径环的 `lookAt(camera.position)` 保持世界坐标调用（three 会按父级矩阵换算局部朝向，**不要**手动 `worldToLocal`）；`clearGroup(treeGroup)` 只清树，不碰 `worldGroup` 里的同伴覆盖层。
 
 ---
 
@@ -150,6 +175,8 @@ node tools/treeview/server.mjs
 5. 页面：Ctrl+F5 后无 banner 错误；加载提示会消失；能看到整树 + 端口；当前节点有光柱/红标记（mock 模式可造）
 6. 窄视口（拖窄窗口或 DevTools 手机尺寸，如 540×960 / 400px）：顶栏不被左右面板遮挡；左右面板不互相覆盖；队列高度 ≤ 约 112px 且可滚动；同伴 >3 时折叠、点卡头能展开
 7. 树侧联动：树 `reload-skills` 后 `modelVersion` +1，页面模型自动重拉
+8. 调度 HUD：`/api/state` 的 `companions[]` 出现 `timePhase/intentState/drives/attention/instinct/learning/helpNeeded`；页面同伴卡显示时段/意图/候选/四压力条/注意/本能/学习/求助。若树进程未重启，字段缺失属预期（见 §4.2 警告）
+9. 空闲自转：不操作约 9s 后 3D 树体缓慢旋转；移动鼠标/滚轮/触摸/按键立即停；拖拽/缩放视角仍由 OrbitControls 正常控制
 
 **已知现象**：
 - 页面首次打开若树没跑：显示静态图 + OFFLINE，正常。
@@ -172,6 +199,8 @@ node tools/treeview/server.mjs
 | 加回放/时间轴 | 新增 `GET /api/trace?since=`；前端用历史 events 时间轴重放（当前 events 记忆只在内存） |
 | 面板挡住顶栏 / 队列无限拉长 | 顶栏高度走 `--top-h`（`syncHudMetrics()`，别写死 `top`）；队列上限改 `app.mjs` 的 `CARD_QUEUE_RENDER_MAX / CARD_QUEUE_HEAD / CARD_QUEUE_TAIL`，可视高度改 `index.html` 的 `.q-list{max-height}` |
 | 同伴很多 / 卡片太长 | 卡头点击折叠（`state.cardCollapsed`，>3 默认折叠）；左栏 `.left` 自身滚动；给卡片加字段要加进 `renderCards()` 的增量更新（别退回整卡 `innerHTML`） |
+| 调度 HUD 加/改字段 | 树侧 `src/state.mjs snapshot()` 追加只读字段 → `app.mjs renderSched()` 展示（缺失容错）；同步本文 §4.2。改 snapshot 需树下次启动才生效 |
+| 调自动旋转 | `app.mjs` 的 `AUTO_ROTATE_IDLE_MS`（默认 9000）/ `AUTO_ROTATE_SPEED`（0.08 rad/s）；旋转对象是 `worldGroup`，不是相机 |
 | 换游戏/换树 | 新建 `adapters/<name>/model.mjs` 实现同契约，core 不动 |
 
 ---
@@ -192,6 +221,8 @@ node tools/treeview/server.mjs
 12. **滚动容器里的 flex 子项要 `flex:0 0 auto`**：`.q-list` 与 `.left`/`.right` 都是 `display:flex; flex-direction:column; max-height/固定高度 + overflow:auto`，子项默认 `flex-shrink:1` 会被压扁——`.q-item` 被压成 0 高（队列一片空白、只剩"省略 N 项"），`.left` 里的 `.card` 被压到容器高度（同伴一多内容被裁掉且不能滚动）。`.left>.card`/`.right>.card` 已固定 `flex:0 0 auto`。
 13. **1s 轮询别用 `innerHTML` 重建整卡**：会丢队列滚动位置和折叠状态；`renderCards()` 是增量更新（DOM 只建一次），改卡片字段时沿用这个模式。
 14. **`clearGroup()` 释放资源时注意作用域**：曾把 `m.dispose?.()` 写在 `for (const m of mats)` 循环外 → 每 1s 轮询都抛 `m is not defined`，页面只更新一次、看起来像"卡住/离线"。改动后跑一次页面 Console 确认无 `[treeview] poll failed`。
+15. **snapshot 追加字段≠立即生效**：`src/state.mjs` 由树进程启动时加载；只改文件不重启树，`/status`（因而 `/api/state`）还是旧字段。treeview 绝不能为此重启树；HUD 对缺失字段显示"未上报"。验证 snapshot 本身可 `node --input-type=module` 构造 `CompanionState` 调 `snapshot()`。
+16. **自动旋转别转相机**：用 `controls.autoRotate` 会和用户拖拽抢控制权；本项目转 `worldGroup`（树体+同伴覆盖层）。同伴路径环继续 `lookAt(camera.position)`（世界坐标，three 会按父级矩阵换算；手动 `worldToLocal` 反而会歪）；且别把同伴 group 塞进 `treeGroup`（`buildScene()` 的 `clearGroup(treeGroup)` 会在重拉模型时把它们清掉）。
 
 ---
 

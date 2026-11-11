@@ -26,16 +26,27 @@ function makeFake(world = {}) {
     calls.push({ atomId, params });
     switch (atomId) {
       case 'atom.move_segment': {
+        if (w.moveFail) return { ok: false, kind: 'no_path', msg: '走不动' };
         w.distance = Math.max(0, w.distance - w.step);
         return { ok: true, moved: w.step, distance: w.distance, x: 0, y: 0, z: 0 };
       }
+      case 'atom.scan_container':
+        return { ok: true, count: 2, slot1: 'minecraft:oak_planks x 16', slot2: 'minecraft:stick x 8' };
+      case 'atom.place_one':
+        if (w.placeFail) return { ok: false, kind: 'out_of_reach', msg: '够不着' };
+        return { ok: true, placed: 1, left: 0, block: params.block };
+      case 'atom.dig_cluster':
+        return { ok: true, found: !w.noCluster, dug: w.noCluster ? 0 : (params.count ?? 1), collected: 2 };
+      case 'atom.sleep_once':
+        if (w.dayTime) return { ok: false, kind: 'failed', msg: '现在不能睡' };
+        return { ok: true, slept: true };
       case 'atom.scan_block':
         return { ok: true, air: w.air, in_reach: w.inReach, name: 'minecraft:dirt' };
       case 'atom.dig_one':
         w.air = true;
         return { ok: true, air: true, block: 'minecraft:dirt', delta: 1 };
       case 'atom.collect_near':
-        return { ok: true, count: 1 };
+        return { ok: true, count: w.collectCount ?? 1 };
       case 'atom.eat_one': {
         const before = w.hunger;
         w.hunger = before + 2;
@@ -64,6 +75,7 @@ function makeFake(world = {}) {
         return { ok: true, item: 'minecraft:bread', hunger_before: before, hunger_after: w.hunger, count_before: 1, count_after: 0 };
       }
       case 'atom.equip_best_weapon':
+        if (w.noWeapon) return { ok: true, held: null, no_weapon: true };
         return { ok: true, held: 'minecraft:wooden_sword', no_weapon: false };
       case 'atom.move_flee':
         w.threatDistance = Math.max(w.threatDistance ?? 8, 14);
@@ -86,6 +98,57 @@ function makeFake(world = {}) {
           y: 0,
           z: 0,
         };
+      case 'atom.recipe_query':
+        if (w.noRecipe) return { ok: true, count: 0, recipes_json: '[]' };
+        return {
+          ok: true,
+          count: 1,
+          recipes_json: '[{"id":"minecraft:stick","station":"crafting","item":"minecraft:stick","makes":4,"ingredients":["minecraft:oak_planks"]}]',
+          recipe_id: 'minecraft:stick',
+          station: 'crafting',
+          item: params.item,
+          makes: 4,
+        };
+      case 'atom.craftable_query':
+        if (w.noCraftable) return { ok: true, count: 0, recipes_json: '[]' };
+        return {
+          ok: true,
+          count: 2,
+          recipes_json: '[{"id":"minecraft:stick","station":"crafting"}]',
+          recipe_id: 'minecraft:stick',
+          station: 'crafting',
+          item: 'minecraft:stick',
+          makes: 4,
+        };
+      case 'atom.count_items':
+        return { ok: true, item: params.item, count: w.itemCount ?? 12 };
+      case 'atom.locate_station':
+        if (w.noStation) return { ok: true, found: false, count: 0 };
+        return {
+          ok: true,
+          found: true,
+          count: 1,
+          block: 'minecraft:crafting_table',
+          x: 1,
+          y: 2,
+          z: 3,
+          distance: 2,
+        };
+      case 'atom.open_station':
+        if (w.noWindow) return { ok: true, opened: false, detail: 'clicked' };
+        return { ok: true, opened: true, detail: 'window' };
+      case 'atom.craft_batch':
+        if (w.noMaterial) return { ok: false, kind: 'no_material', msg: '缺 2 个木板' };
+        return { ok: true, crafted: params.count ?? 1, carrying: params.count ?? 1, more: false };
+      case 'atom.store_batch':
+        return { ok: true, moved: w.moved ?? 1, item: params.item };
+      case 'atom.fetch_batch':
+        return { ok: true, moved: w.moved ?? 1, item: params.item };
+      case 'atom.smelt_batch':
+        if (w.smeltFail) return { ok: false, kind: 'failed', msg: '炉子不可用' };
+        return { ok: true, took: w.smelted ?? 1, item: params.item };
+      case 'atom.collect_near':
+        return { ok: true, count: w.collectCount ?? 2 };
       case 'atom.try_step':
         if (w.stuck) return { ok: false, kind: 'no_path', msg: '卡住' };
         return { ok: true, moved: 3, x: 0, y: 0, z: 0 };
@@ -109,6 +172,21 @@ check('move_flee 生成 move.flee', buildAtom('move_flee', { from: { x: 1, y: 2,
 check('attack_one 生成 fight.attack', buildAtom('attack_one', { entityId: 7 }).code.includes('numen.fight.attack'));
 check('swing_once 生成 use.hit', buildAtom('swing_once', { entityId: 7 }).code.includes('numen.use.hit'));
 check('scan_entity_id 生成 scan.entities', buildAtom('scan_entity_id', { entityId: 7 }).code.includes('numen.scan.entities'));
+check('recipe_query 生成 inv.recipes', buildAtom('recipe_query', { item: 'minecraft:stick' }).code.includes('numen.inv.recipes'));
+check('craftable_query 生成 inv.craftable', buildAtom('craftable_query', {}).code.includes('numen.inv.craftable'));
+check('count_items 生成 inv.count', buildAtom('count_items', { item: 'minecraft:stick' }).code.includes('numen.inv.count'));
+check('locate_station 生成 scan.blocks', buildAtom('locate_station', {}).code.includes('numen.scan.blocks'));
+check('open_station 生成 use.block', buildAtom('open_station', { cell: { x: 1, y: 2, z: 3 } }).code.includes('numen.use.block'));
+check('craft_batch 生成 inv.craft', buildAtom('craft_batch', { recipe: 'minecraft:stick', count: 1 }).code.includes('numen.inv.craft'));
+check('store_batch 生成 inv.store', buildAtom('store_batch', { cell: { x: 1, y: 2, z: 3 }, item: 'minecraft:stick' }).code.includes('numen.inv.store'));
+check('fetch_batch 生成 inv.fetch', buildAtom('fetch_batch', { cell: { x: 1, y: 2, z: 3 }, item: 'minecraft:stick' }).code.includes('numen.inv.fetch'));
+check('smelt_batch 生成 inv.smelt', buildAtom('smelt_batch', { cell: { x: 1, y: 2, z: 3 }, item: 'minecraft:iron_ore' }).code.includes('numen.inv.smelt'));
+check('collect_drops 生成 work.collect', buildAtom('collect_near', { radius: 6 }).code.includes('numen.work.collect'));
+check('equip_best 生成 gear.hold', buildAtom('equip_best_weapon').code.includes('numen.gear.hold'));
+check('scan_container 生成 scan.container', buildAtom('scan_container', { cell: { x: 1, y: 2, z: 3 } }).code.includes('numen.scan.container'));
+check('place_one 生成 build.place', buildAtom('place_one', { cell: { x: 1, y: 2, z: 3 }, block: 'minecraft:crafting_table' }).code.includes('numen.build.place'));
+check('dig_cluster 生成 scan.blocks+work.dig', buildAtom('dig_cluster', { block: 'minecraft:oak_log' }).code.includes('numen.scan.blocks') && buildAtom('dig_cluster', { block: 'minecraft:oak_log' }).code.includes('numen.work.dig'));
+check('sleep_once 生成 use.sleep', buildAtom('sleep_once', {}).code.includes('numen.use.sleep'));
 check('try_step 生成 move.to', buildAtom('try_step').code.includes('numen.move.to'));
 check('未知原子抛错', (() => { try { buildAtom('nope'); return false; } catch { return true; } })());
 check('缺 cell 抛错', (() => { try { buildAtom('dig_one', {}); return false; } catch { return true; } })());
@@ -194,6 +272,158 @@ console.log('生存战术（Batch A）：');
   const r = await runTactic('attack_target', { entityId: 7 }, { executeAtom: fake.executeAtom });
   check('attack_target 目标已不在 → 直接成功', r.ok === true && r.atoms === 1, JSON.stringify(r).slice(0, 160));
 }
+console.log('只读战术（Batch B）：');
+{
+  const fake = makeFake({});
+  const r = await runTactic('query_recipes', { item: 'minecraft:stick' }, { executeAtom: fake.executeAtom });
+  check('query_recipes 找到配方 → 成功', r.ok === true, JSON.stringify(r).slice(0, 160));
+  check('query_recipes 返回 recipe_id', r.vars?.q?.recipe_id === 'minecraft:stick', JSON.stringify(r.vars?.q));
+}
+{
+  const fake = makeFake({ noRecipe: true });
+  const r = await runTactic('query_recipes', { item: 'minecraft:diamond' }, { executeAtom: fake.executeAtom });
+  check('query_recipes 无配方 → not_success', r.ok === false && r.kind === 'not_success', JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('query_craftable', {}, { executeAtom: fake.executeAtom });
+  check('query_craftable 有可做 → 成功', r.ok === true, JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({ noCraftable: true });
+  const r = await runTactic('query_craftable', {}, { executeAtom: fake.executeAtom });
+  check('query_craftable 没材料 → not_success', r.ok === false && r.kind === 'not_success', JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({ itemCount: 12 });
+  const r = await runTactic('count_items', { item: 'minecraft:stick' }, { executeAtom: fake.executeAtom });
+  check('count_items 返回数量', r.ok === true && r.vars?.n?.count === 12, JSON.stringify(r.vars?.n));
+}
+{
+  const fake = makeFake({ itemCount: 0 });
+  const r = await runTactic('count_items', { item: 'minecraft:stick' }, { executeAtom: fake.executeAtom });
+  check('count_items 数量 0 也算成功', r.ok === true && r.vars?.n?.count === 0, JSON.stringify(r.vars?.n));
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('locate_station', { block: 'minecraft:crafting_table' }, { executeAtom: fake.executeAtom });
+  check('locate_station 找到工作台', r.ok === true && r.vars?.s?.found === true, JSON.stringify(r.vars?.s));
+}
+{
+  const fake = makeFake({ noStation: true });
+  const r = await runTactic('locate_station', {}, { executeAtom: fake.executeAtom });
+  check('locate_station 找不到 → not_success', r.ok === false && r.kind === 'not_success', JSON.stringify(r).slice(0, 160));
+}
+
+console.log('生存/建造战术（Batch C）：');
+{
+  const fake = makeFake({});
+  const r = await runTactic('scan_container', { cell: { x: 1, y: 2, z: 3 } }, { executeAtom: fake.executeAtom });
+  check('scan_container 查到 2 格 → 成功', r.ok === true && r.vars?.c?.count === 2, JSON.stringify(r.vars?.c));
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('place_one', { cell: { x: 1, y: 2, z: 3 }, block: 'minecraft:crafting_table' }, { executeAtom: fake.executeAtom });
+  check('place_one 放下 1 个 → 成功', r.ok === true && r.vars?.p?.placed === 1, JSON.stringify(r.vars?.p));
+}
+{
+  const fake = makeFake({ placeFail: true });
+  const r = await runTactic('place_one', { cell: { x: 1, y: 2, z: 3 }, block: 'minecraft:crafting_table' }, { executeAtom: fake.executeAtom });
+  check('place_one 够不着 → out_of_reach', r.ok === false && r.kind === 'out_of_reach', JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('dig_cluster', { block: 'minecraft:oak_log', count: 3 }, { executeAtom: fake.executeAtom });
+  check('dig_cluster 挖到 3 个 → 成功', r.ok === true && r.vars?.d?.dug === 3, JSON.stringify(r.vars?.d));
+}
+{
+  const fake = makeFake({ noCluster: true });
+  const r = await runTactic('dig_cluster', { block: 'minecraft:oak_log' }, { executeAtom: fake.executeAtom });
+  check('dig_cluster 没找到 → not_success', r.ok === false && r.kind === 'not_success');
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('sleep_once', {}, { executeAtom: fake.executeAtom });
+  check('sleep_once 入睡 → 成功', r.ok === true && r.vars?.s?.slept === true, JSON.stringify(r.vars?.s));
+}
+{
+  const fake = makeFake({ dayTime: true });
+  const r = await runTactic('sleep_once', {}, { executeAtom: fake.executeAtom });
+  check('sleep_once 白天睡不了 → 失败', r.ok === false, JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('travel_to', { target: { x: 10, y: 64, z: 10 }, arrive: 2 }, { executeAtom: fake.executeAtom });
+  check('travel_to 分片走到目标 → 成功', r.ok === true, JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({ moveFail: true });
+  const r = await runTactic('travel_to', { target: { x: 10, y: 64, z: 10 }, arrive: 2 }, { executeAtom: fake.executeAtom });
+  check('travel_to 走不动 → no_path', r.ok === false && r.kind === 'no_path', JSON.stringify(r).slice(0, 160));
+}
+
+console.log('交互战术（Batch B）：');
+{
+  const fake = makeFake({});
+  const r = await runTactic('open_station', { cell: { x: 1, y: 2, z: 3 } }, { executeAtom: fake.executeAtom });
+  check('open_station 打开窗口 → 成功', r.ok === true && r.vars?.w?.opened === true, JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({ noWindow: true });
+  const r = await runTactic('open_station', { cell: { x: 1, y: 2, z: 3 } }, { executeAtom: fake.executeAtom });
+  check('open_station 没窗口 → not_success', r.ok === false && r.kind === 'not_success', JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('craft_batch', { recipe: 'minecraft:stick', count: 4 }, { executeAtom: fake.executeAtom });
+  check('craft_batch 做出 4 个 → 成功', r.ok === true && r.vars?.c?.crafted === 4, JSON.stringify(r.vars?.c));
+}
+{
+  const fake = makeFake({ noMaterial: true });
+  const r = await runTactic('craft_batch', { recipe: 'minecraft:stick', count: 4 }, { executeAtom: fake.executeAtom });
+  check('craft_batch 缺材料 → no_material', r.ok === false && r.kind === 'no_material', JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({ moved: 3 });
+  const r = await runTactic('store_batch', { cell: { x: 1, y: 2, z: 3 }, item: 'minecraft:stick' }, { executeAtom: fake.executeAtom });
+  check('store_batch 存入 3 个', r.ok === true && r.vars?.s?.moved === 3, JSON.stringify(r.vars?.s));
+}
+{
+  const fake = makeFake({ moved: 2 });
+  const r = await runTactic('fetch_batch', { cell: { x: 1, y: 2, z: 3 }, item: 'minecraft:stick' }, { executeAtom: fake.executeAtom });
+  check('fetch_batch 取出 2 个', r.ok === true && r.vars?.f?.moved === 2, JSON.stringify(r.vars?.f));
+}
+{
+  const fake = makeFake({ smelted: 3 });
+  const r = await runTactic('smelt_batch', { cell: { x: 1, y: 2, z: 3 }, item: 'minecraft:iron_ore', count: 3 }, { executeAtom: fake.executeAtom });
+  check('smelt_batch 熔出 3 个 → 成功', r.ok === true && r.vars?.m?.took === 3, JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({ smeltFail: true });
+  const r = await runTactic('smelt_batch', { cell: { x: 1, y: 2, z: 3 }, item: 'minecraft:iron_ore' }, { executeAtom: fake.executeAtom });
+  check('smelt_batch 炉子不可用 → 失败 kind', r.ok === false && r.kind === 'failed', JSON.stringify(r).slice(0, 160));
+}
+{
+  const fake = makeFake({ collectCount: 3 });
+  const r = await runTactic('collect_drops', { radius: 6 }, { executeAtom: fake.executeAtom });
+  check('collect_drops 捡到 3 个 → 成功', r.ok === true && r.vars?.d?.count === 3, JSON.stringify(r.vars?.d));
+}
+{
+  const fake = makeFake({ collectCount: 0 });
+  const r = await runTactic('collect_drops', {}, { executeAtom: fake.executeAtom });
+  check('collect_drops 没掉落 → not_success', r.ok === false && r.kind === 'not_success');
+}
+{
+  const fake = makeFake({});
+  const r = await runTactic('equip_best', {}, { executeAtom: fake.executeAtom });
+  check('equip_best 有武器 → 成功', r.ok === true && r.vars?.w?.held === 'minecraft:wooden_sword', JSON.stringify(r.vars?.w));
+}
+{
+  const fake = makeFake({ noWeapon: true });
+  const r = await runTactic('equip_best', {}, { executeAtom: fake.executeAtom });
+  check('equip_best 没武器 → not_success', r.ok === false && r.kind === 'not_success');
+}
+
 {
   const fake = makeFake({ stuck: false });
   const r = await runTactic('survive_unstick', {}, { executeAtom: fake.executeAtom });

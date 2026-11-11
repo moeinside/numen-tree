@@ -48,15 +48,29 @@ import reuseTable from './fixtures/reuse_table.mjs';
 import steerYield from './fixtures/steer_yield.mjs';
 import tacticLane from './fixtures/tactic_lane.mjs';
 import tacticPreempt from './fixtures/tactic_preempt.mjs';
+import priorityDeny from './fixtures/priority_deny.mjs';
+import priorityKeep from './fixtures/priority_keep.mjs';
+import priorityIneligible from './fixtures/priority_ineligible.mjs';
+import capD1Ideal from './fixtures/cap_d1_ideal.mjs';
+import capD1Defect from './fixtures/cap_d1_defect.mjs';
+import capD2Ideal from './fixtures/cap_d2_ideal.mjs';
+import capD2Defect from './fixtures/cap_d2_defect.mjs';
+import capWeaponFirst from './fixtures/cap_weapon_first.mjs';
+import capReflexPreemptSolvable from './fixtures/cap_reflex_preempt_solvable.mjs';
+import capReflexPreemptUnsolvable from './fixtures/cap_reflex_preempt_unsolvable.mjs';
+import capGateStalled from './fixtures/cap_gate_stalled.mjs';
+import capDispatchStall from './fixtures/cap_dispatch_stall.mjs';
 import instinctYield from './fixtures/instinct_yield.mjs';
 import execMode from './fixtures/exec_mode.mjs';
+import execGate from './fixtures/exec_gate.mjs';
 import stuck from './fixtures/stuck.mjs';
 import death from './fixtures/death.mjs';
+import slotResume from './fixtures/slot_resume.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 
-const FIXTURES = [hungry, eatFirst, lowHp, night, nightGuard, dayWork, autoWorkFail, taskEvents, lockRecover, bootstrapKit, toolKit, reuseTable, steerYield, tacticLane, tacticPreempt, instinctYield, execMode, stuck, death];
+const FIXTURES = [hungry, eatFirst, lowHp, night, nightGuard, dayWork, autoWorkFail, taskEvents, lockRecover, bootstrapKit, toolKit, reuseTable, steerYield, tacticLane, tacticPreempt, priorityDeny, priorityKeep, priorityIneligible, capD1Ideal, capD1Defect, capD2Ideal, capD2Defect, capWeaponFirst, capReflexPreemptSolvable, capReflexPreemptUnsolvable, capGateStalled, capDispatchStall, instinctYield, execMode, execGate, stuck, death, slotResume];
 const DEFAULT_TICK_MS = 8;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -113,6 +127,7 @@ export function classifyLua(code) {
   if (c.includes('numen.inv.eat')) return 'eat';
   if (c.includes('numen.move.explore') && c.includes('numen.use.block')) return 'seek_food';
   if (c.includes('numen.move.explore')) return 'explore';
+  if (c.includes('WANT_OPEN')) return 'find_block';
   if (c.includes('numen.scan.blocks') && c.includes('numen.use.block')) return 'store_items';
   // 只读扫描：找已有方块（不放置）；scan_ground 用单数 scan.block
   if (c.includes('numen.scan.blocks') && !c.includes('numen.use.block')) return 'find_block';
@@ -520,6 +535,12 @@ async function main() {
   await loadSkills(); // Lane 派技能前必须先注册技能表
 
   const baseCfg = loadConfig();
+  baseCfg.goalStore.enabled = false; // 回放绝不写真实 goalstore.json
+  baseCfg.priorityStore = { file: null }; // 回放绝不读真实 priority-state
+  baseCfg.behavior ??= {};
+  baseCfg.behavior.baseGuard = false; // 回放夹具自带“家”，不启用基地禁挖
+  if (baseCfg.tentacle) baseCfg.tentacle.enabled = false;
+  if (baseCfg.behavior?.tentacle) baseCfg.behavior.tentacle.enabled = false;
   const before = snapshotRealFiles();
 
   console.log('=== numen-tree 离线回放（M1）===');

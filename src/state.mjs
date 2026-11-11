@@ -6,6 +6,9 @@
  */
 
 import { planView } from './plan.mjs';
+import { describeDrives } from './drives.mjs';
+import { describeLearning } from './learning.mjs';
+import { diagnose } from './diagnose.mjs';
 
 let goalSeq = 0;
 
@@ -18,13 +21,17 @@ export const GoalStatus = {
   DETACHED: 'detached',
 };
 
-export function makeGoal({ skill, params = {}, priority = 0, note = '' }) {
+export function makeGoal({ skill, params = {}, priority = 0, note = '', priorityClass = null, consequence = null, reversal = null, eligible = null }) {
   return {
     id: `g${++goalSeq}`,
     skill,
     params,
     priority,
     note,
+    priorityClass,
+    consequence,
+    reversal,
+    eligible,
     status: GoalStatus.PENDING,
     createdAt: new Date().toISOString(),
     startedAt: null,
@@ -172,6 +179,29 @@ export class CompanionState {
   }
 
   snapshot() {
+    const wait = (this.paused || this.waitReason || this.waitUntil > 0 || this.plan?.status === 'suspended')
+      ? {
+          active: true,
+          reason: this.waitReason || this.plan?.suspendedBy || (this.paused ? 'paused' : 'suspended'),
+          recoverable: Boolean(this.paused || this.plan?.suspendedBy || this.waitUntil > 0),
+          until: this.waitUntil || null,
+          blockedBy: this.plan?.suspendedBy ?? (this.paused ? 'paused' : null),
+        }
+      : null;
+    const diagnosis = diagnose({
+      now: Date.now(),
+      plan: this.plan
+        ? { id: this.plan.id, status: this.plan.status, cursor: this.plan.cursor,
+            startedAt: Date.parse(this.plan.startedAt) || Date.now() }
+        : null,
+      current: this.current,
+      currentMissing: Boolean(this.plan && this.plan.status === 'active' && !this.current),
+      actionLock: this.actionLock
+        ? { owner: this.current?.goalId ?? 'unknown', since: this.lastActionAt }
+        : null,
+      wait,
+      progress: { lastProgressAt: this.lastActionAt || Date.now() },
+    });
     return {
       name: this.name,
       id: this.id,
@@ -227,6 +257,42 @@ export class CompanionState {
       })),
       busy: this.actionLock,
       plan: this.plan ? planView(this.plan) : null,
+      diagnosis,
+      wait,
+      lastAtomSnapshot: this.lastAtomSnapshot ?? null,
+      // ── 优先度调度可观测字段（只读视图，不参与决策）──────────────
+      // timePhase/drives/attention/instinct/intentState/learning/helpNeeded 由 lane 计算，
+      // 这里只做序列化；treeview HUD 与 tree_status 读取，不改任何行为。
+      timePhase: this.timePhase ?? null,
+      intentState: this.intentState ?? null,
+      drives: this.drives ? describeDrives(this.drives) : null,
+      attention: this.attention ?? null,
+      instinct: this.instinct ?? null,
+      learning: this.learning ? describeLearning(this.learning) : null,
+      helpNeeded: this.helpNeeded ?? null,
+      priority: this.priority
+        ? {
+            current: this.priority.current ?? null,
+            lastDecision: this.priority.lastDecision ?? null,
+            interruptions: this.priority.interruptions?.length ?? 0,
+            settled: this.priority.settled?.length ?? 0,
+          }
+        : null,
+      priorityStats: this.priorityStats ?? null,
+      priorityTx: this.priorityTx
+        ? { id: this.priorityTx.id, goalId: this.priorityTx.goalId, status: this.priorityTx.status }
+        : null,
+      priorityAtomTx: this.priorityAtomTx
+        ? { id: this.priorityAtomTx.id, atomId: this.priorityAtomTx.atomId, parentTxId: this.priorityAtomTx.parentTxId, status: this.priorityAtomTx.status }
+        : null,
+      readiness: this.readiness ?? null,
+      readinessAuditDay: this.readinessAuditDay ?? null,
+      performanceFactor: this.performanceFactor ?? null,
+      failureDegradedUntil: this.failureDegradedUntil ?? null,
+      blocked: this.blocked ?? null,
+      waitUntil: this.waitUntil ?? 0,
+      waitReason: this.waitReason ?? null,
+      toolHealth: this.toolHealth ? JSON.parse(JSON.stringify(this.toolHealth)) : null,
       drive: this.driveStartedAt
         ? {
             startedAt: this.driveStartedAt,

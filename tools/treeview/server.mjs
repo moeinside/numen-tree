@@ -185,6 +185,40 @@ function mockState() {
       hp: 20 - ci, hunger: 12 + ci, mode: 'survival', paused: false, dark: step % 8 < 3,
       schedule: { id: ci === 0 ? 'day' : 'night', title: ci === 0 ? '白天' : '夜里守家', nightGuard: ci === 1 },
       plan,
+      // 优先度调度字段（与 src/state.mjs snapshot() 追加字段同形，供 HUD 演示/自检）
+      timePhase: ['dawn', 'morning', 'noon', 'afternoon', 'dusk', 'night', 'midnight'][step % 7],
+      intentState: {
+        at: new Date().toISOString(),
+        current: {
+          goalId: `g${ci}1`,
+          need: ci === 0 ? 'food_low' : 'safety_hold',
+          intent: ci === 0 ? 'secure_food' : 'safety_hold',
+          priority: ci === 0 ? 62 : 48,
+          status: 'running',
+        },
+        candidates: [
+          { need: ci === 0 ? 'food_low' : 'safety_hold', intent: ci === 0 ? 'secure_food' : 'safety_hold', strategy: ci === 0 ? 'secure_food' : 'safety_hold', priority: ci === 0 ? 62 : 48, switchCost: 5 },
+          { need: 'get_weapon', intent: 'secure_gear', strategy: 'secure_gear', priority: 41, switchCost: 12 },
+          { need: 'night_safety', intent: 'prepare_for_night', strategy: 'prepare_for_night', priority: 33, switchCost: 8 },
+        ],
+      },
+      drives: { hunger: 0.12 + (step % 4) * 0.05, fatigue: (step % 7) / 10, safety: ci * 0.15, resource: 0.3, satiation: {} },
+      attention: {
+        salience: { food: 45, gear: 30, night: ci === 1 ? 55 : 10, safety: 20, threat: 0, pain: 0 },
+        focus: ci === 0 ? 'secure_food' : 'safety_hold',
+        captured: null,
+      },
+      instinct: { active: false, kind: null, priority: 0, reason: null },
+      learning: {
+        updatedAt: new Date().toISOString(),
+        strategies: {
+          secure_food: { attempts: 5, success: 3, fail: 2, successRate: 0.6, ewmaSuccess: 0.58, bonus: 1, lastKind: null },
+          safety_hold: { attempts: 2, success: 1, fail: 1, successRate: 0.5, ewmaSuccess: 0.5, bonus: 0, lastKind: 'threat_close' },
+        },
+      },
+      helpNeeded: ci === 1
+        ? { kind: 'need_gear', message: '空手不出去准备过夜：先做一把武器', hint: '给一只木剑或放点木头到箱子里', at: new Date().toISOString() }
+        : null,
       goals: [
         { id: `g${ci}1`, skill: cursor === 'chop' ? 'mine_nearby' : 'collect_items', status: 'running', priority: 20, note: 'mcp' },
         { id: `g${ci}2`, skill: 'go_home', status: 'pending', priority: 10, note: 'auto:' },

@@ -10,7 +10,7 @@ A resident "little brain" for numen-driven companions in Minecraft — **you say
 
 > Unofficial experimental project. Not affiliated with the numen author.
 
-Repository: <https://github.com/moeinside/numen-tree> · License: MIT
+Repository: <https://github.com/moeinside/numen-tree> · License: MIT · Changelog: [CHANGELOG](CHANGELOG.md)
 
 ---
 
@@ -40,7 +40,7 @@ numen-tree is a **resident process on your PC** that connects to the in-game num
 - **It reports up.** Done, stuck, or needs a decision — the tree pushes a classified event to the brain. No news, no interruption.
 - **It never takes over command.** The LLM can only set goals, not steer walking or swinging; a companion has exactly one driver at a time, so two AIs never fight over one body.
 
-Also included: 25 executable skills (walk, dig, chop, craft, smelt, haul, build, fight, eat, explore, follow…), a places book (home / base / death points), three behavior modes (survival / production / combat, per companion), multi-companion concurrency, and an optional visualization tool.
+Also included: 27 executable skills (walk, dig, chop, craft, smelt, haul, build, fight, eat, explore, follow…), a places book (home / base / death points), three behavior modes (survival / production / combat, per companion), multi-companion concurrency, and an optional visualization tool.
 
 > ⚠️ **This is an experimental project (WIP).** Interfaces, config and behavior will change. It has only been tested on one save, on Windows, single-player. Don't trust it with a save you care about.
 
@@ -53,7 +53,8 @@ Also included: 25 executable skills (walk, dig, chop, craft, smelt, haul, build,
 | Minecraft | **1.21.1** |
 | NeoForge | **21.1.265** (minimum 21.1.233), Java 21 |
 | numen | **0.1.4.1** — download the NeoForge 1.21.1 build from [CurseForge](https://www.curseforge.com/minecraft/mc-mods/numen-ai) |
-| numenlockfix | **1.1.0**, bundled in this repo's [`mods/`](mods/). **Required** — without it companions deadlock after switching saves |
+| numenlockfix | **1.2.0**, bundled in this repo's [`mods/`](mods/). **Required** — without it companions deadlock after switching saves |
+| numen-tree-tentacle | **0.3.0**, bundled in this repo's [`mods/`](mods/). **Recommended** — read-only perception (sight, entities, landmarks); without it perception degrades |
 | Node.js | **18+** — install the [LTS build](https://nodejs.org/en/download); `node -v` should print a version |
 | DSH | [DeepSeek Harness](https://github.com/deepseek-ai) client, with a working model (DeepSeek account or your own API) |
 | DSH config from this repo | [`DSH/dsh-setup.md`](DSH/dsh-setup.md) — one file you hand to DSH and it configures itself |
@@ -64,7 +65,7 @@ Also included: 25 executable skills (walk, dig, chop, craft, smelt, haul, build,
 
 ### 4.2 Step by step
 
-1. **Install the mods**: put `numen-neoforge-1.21.1-0.1.4.1.jar` and this repo's `mods/numenlockfix-1.1.0.jar` into the game's mods folder, then **restart the game**.
+1. **Install the mods**: put `numen-neoforge-1.21.1-0.1.4.1.jar` and this repo's two jars (`mods/numenlockfix-1.2.0.jar`, `mods/numen-tree-tentacle-0.3.0.jar`) into the game's mods folder, then **restart the game**.
    (With HMCL version isolation the folder is `.minecraft\versions\<version>\mods\`, not `.minecraft\mods\`.)
 2. **Launch the game and enable the External Brain** (this is what makes the connection possible):
    1. Press `G` to open the numen panel (`N` on 1.21.8+);
@@ -105,7 +106,7 @@ The only step you must do yourself: **restart DSH**. After that, a new session w
 
 ### 4.4 Uninstall
 
-- Delete `mods/numenlockfix-1.1.0.jar` and restart the game → back to stock numen
+- Delete `mods/numenlockfix-1.2.0.jar` and `mods/numen-tree-tentacle-0.3.0.jar` and restart the game → back to stock numen
 - Delete the preset block from your DSH config → back to a normal DSH session
 - Close the tree window; to clear leftover locks, use `/numenlockfix` in game or `node src/cli.mjs lock --all`
 
@@ -147,7 +148,7 @@ What it can do today: in a single-player save, make 1–2 companions work throug
 What you'll actually run into:
 
 - **It gets stuck**: blocked paths, targets behind walls, failed ladder climbing — it stands still or paces back and forth. Rephrase the goal, or open the way yourself.
-- **It only knows a few jobs**: within its 25 skills (chop, mine, haul, craft, fight, eat, follow…) it's fine; beyond that it says "I can't" instead of inventing something.
+- **It only knows a few jobs**: within its 27 skills (chop, mine, haul, craft, fight, eat, follow…) it's fine; beyond that it says "I can't" instead of inventing something.
 - **Multiple companions aren't smart together**: they don't negotiate — they may fight over the same tree or block each other. Start with one.
 - **Say nothing and it idles**: with the LLM offline it only survives by rules, it won't invent new work.
 - **Occasional game restarts**: if a companion totally ignores you after switching saves or dimensions, numen's program lock is stuck. The bundled patch clears some cases, not all.

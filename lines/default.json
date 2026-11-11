@@ -26,6 +26,32 @@
       "weight": 2
     },
     {
+      "id": "task_failed_detail",
+      "when": "task_failed_detail",
+      "slots": ["title", "reason"],
+      "text": [
+        "{title}没成：{reason}",
+        "卡在{title}：{reason}",
+        "{title}先停一下，{reason}",
+        "这轮{title}没走通，{reason}"
+      ],
+      "cooldownSeconds": 90,
+      "weight": 2
+    },
+    {
+      "id": "task_done",
+      "when": "task_done",
+      "slots": ["title"],
+      "text": [
+        "搞定了：{title}",
+        "{title}完成了",
+        "这轮{title}走通",
+        "做完{title}"
+      ],
+      "cooldownSeconds": 60,
+      "weight": 2
+    },
+    {
       "id": "task_failed",
       "when": "task_failed",
       "slots": ["reason"],
@@ -59,6 +85,37 @@
       "when": "companion_missing",
       "text": ["我不在这个世界", "好像把我弄丢了"],
       "cooldownSeconds": 600,
+      "weight": 1
+    },
+    {
+      "id": "task_start",
+      "when": "task_start",
+      "slots": ["title"],
+      "text": ["去{title}", "开始{title}"],
+      "cooldownSeconds": 60,
+      "weight": 1
+    },
+    {
+      "id": "tactic_done",
+      "when": "tactic_done",
+      "slots": ["title"],
+      "text": ["{title}搞定", "这步成了：{title}", "搞定"],
+      "cooldownSeconds": 60,
+      "weight": 1
+    },
+    {
+      "id": "low_hp",
+      "when": "low_hp",
+      "slots": ["hp"],
+      "text": ["血不多了（{hp}）", "我快撑不住了"],
+      "cooldownSeconds": 120,
+      "weight": 1
+    },
+    {
+      "id": "danger",
+      "when": "danger",
+      "text": ["有点危险，我稳一点", "附近不太平"],
+      "cooldownSeconds": 120,
       "weight": 1
     }
   ]

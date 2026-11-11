@@ -1,0 +1,21 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+[[mods]]
+modId = "numen_tree_tentacle"
+version = "0.3.0"
+displayName = "Numen Tree Tentacle"
+authors = "local"
+description = '''树的只读触手：具身感知（自身/附近实体/地标/光照/时间），只读、不决策、不执行动作。'''
+[[dependencies.numen_tree_tentacle]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.233,)"
+ordering = "NONE"
+side = "BOTH"
+[[dependencies.numen_tree_tentacle]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1, 1.21.2)"
+ordering = "NONE"
+side = "BOTH"

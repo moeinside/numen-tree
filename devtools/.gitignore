@@ -1,0 +1,6 @@
+# Build output and local runtime secrets (never commit)
+build/
+logs/
+config/
+*.token
+*.local.json

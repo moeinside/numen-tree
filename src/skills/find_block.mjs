@@ -20,6 +20,7 @@ export default {
   params: {
     block: 'string（必填，方块 id）',
     radius: 'number = 24',
+    open: 'boolean = false（找到后尝试打开，失败返回 no_window）',
   },
   meta: { gives: ['found-block'], risk: 'low', budgetMs: 30_000 },
   build(ctx, params = {}) {
@@ -31,10 +32,12 @@ export default {
       };
     }
     const radius = Math.min(64, Math.max(4, Math.floor(Number(params.radius ?? 24)) || 24));
+    const wantOpen = params.open === true || params.open === 'true' || params.open === 1;
     const safe = block.replace(/'/g, "\\'");
     const code = `${LUA_PRELUDE}
 local BLOCK = '${safe}'
 local RADIUS = ${radius}
+local WANT_OPEN = ${wantOpen ? 'true' : 'false'}
 
 local function firstPos(found)
   if type(found) ~= "table" or #found == 0 then return nil end
@@ -57,6 +60,15 @@ local ok, r = pcall(function()
   return { at = at, count = #clusters }
 end)
 if not ok then return FAIL(r) end
+if WANT_OPEN then
+  local moved = pcall(numen.move.to, { x = r.at.x, y = r.at.y, z = r.at.z }, { arrive = "use" })
+  local used, res = pcall(numen.use.block, { x = r.at.x, y = r.at.y, z = r.at.z })
+  local opened = used and type(res) == "table" and (res.put ~= nil or res.take ~= nil)
+  if not opened then
+    return F("no_window", "找到了 " .. BLOCK .. " 但打不开窗口",
+      "台子可能被挡住/不完整，craft+place 一个新的")
+  end
+end
 return J({
   { "found", "true" },
   { "x", N(r.at.x) },

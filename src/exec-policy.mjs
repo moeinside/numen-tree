@@ -25,6 +25,31 @@ export const EXEC_DEFAULTS = {
 
 const HARD_INTERRUPT_KINDS = ['preempted', 'timeout', 'detached', 'slot_blocked'];
 
+/**
+ * 长黑盒/长动作技能：field-guarded 下禁止自主派发（等环境安全或显式高优先级）。
+ * 短/安全技能（eat/equip/find_block/scan_ground/collect_items/idle/index/place_block/retreat/approach_owner）不在名单。
+ */
+export const LONG_SKILLS = new Set([
+  'craft',
+  'mine_nearby',
+  'dig_nearby',
+  'dig_cells',
+  'forage',
+  'seek_food',
+  'explore',
+  'go_to',
+  'smelt',
+  'store_items',
+  'fetch_items',
+  'follow_owner',
+  'pave_forward',
+  'place_build',
+]);
+
+export function isLongSkill(skill) {
+  return LONG_SKILLS.has(String(skill || ''));
+}
+
 function normalizePolicy(policy) {
   const p = policy || {};
   return {

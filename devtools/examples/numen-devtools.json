@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "bindAddress": "127.0.0.1",
+  "port": 8770,
+  "tokenFile": "config/numen-devtools.token",
+  "allowedWorlds": ["numen-test"],
+  "maxPerMinute": 10,
+  "maxCommandLength": 512,
+  "maxBodyBytes": 65536,
+  "_comment": "Example only. Copy to <gameDir>/config/numen-devtools.json. Keep enabled=false unless Lead authorized a dev session. Create <gameDir>/config/numen-devtools.token with 32 random bytes (hex), chmod/ACL to your user only."
+}

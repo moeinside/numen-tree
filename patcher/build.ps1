@@ -26,7 +26,7 @@ $Root = $PSScriptRoot
 $Src = Join-Path $Root 'src'
 $Out = Join-Path $Root 'build\classes'
 $Stage = Join-Path $Root 'build\stage'
-$JarOut = Join-Path $Root 'build\numenlockfix-1.1.0.jar'
+$JarOut = Join-Path $Root 'build\numenlockfix-1.2.0.jar'
 
 foreach ($p in @($Out, $Stage)) {
     if (Test-Path $p) { Remove-Item $p -Recurse -Force }

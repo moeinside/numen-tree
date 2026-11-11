@@ -21,6 +21,8 @@
  */
 
 /** 时段表：从上往下匹配，第一条 when 成立的胜出；最后一条必须是兜底（when 恒真）。 */
+import { statePhase } from './time.mjs';
+
 export const SCHEDULES = [
   // ── 夜里 + 有"家"：在家守家（守卫 + 巡逻），不再满世界跑 ──────────
   {
@@ -51,7 +53,7 @@ export const SCHEDULES = [
       enabled: true,
       radius: 6, // 绕着"家"这个半径的四个角走
       intervalSeconds: 25,
-      requireWeapon: false, // 家里没威胁时巡逻，不看武器
+      requireWeapon: true, // 空手优先回安全点，不出去巡逻
       priority: 15,
       range: 2,
     },
@@ -63,6 +65,51 @@ export const SCHEDULES = [
     title: '夜里（没记家）',
     when: (st) => !!st.dark,
     leash: null,
+    allow: {
+      feed: true,
+      regroup: true,
+      production: false,
+      dayWork: false,
+      guard: false,
+      patrol: false,
+      combat: true,
+    },
+    work: [],
+  },
+
+  // ── 黄昏：收工过渡，不再启动新的长任务；回家/照明/进食 ─────────
+  {
+    id: 'dusk',
+    title: '黄昏收工',
+    when: (st) => !st.dark && statePhase(st) === 'dusk',
+    leash: { maxDistance: 24 },
+    allow: {
+      feed: true,
+      regroup: true,
+      production: false,
+      dayWork: false,
+      guard: true,
+      patrol: false,
+      combat: true,
+    },
+    work: [],
+    guard: {
+      enabled: true,
+      radius: 8,
+      minHpPercent: 55,
+      requireWeapon: true,
+      cooldownSeconds: 15,
+      priority: 30,
+      skill: 'fight_safe',
+    },
+  },
+
+  // ── 疲劳：累了提前收工；schedule 是默认值，不是命令 ─────────────
+  {
+    id: 'tired',
+    title: '疲劳收工',
+    when: (st) => !st.dark && Number(st.drives?.fatigue ?? 0) >= 0.7,
+    leash: { maxDistance: 16 },
     allow: {
       feed: true,
       regroup: true,

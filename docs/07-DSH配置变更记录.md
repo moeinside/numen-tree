@@ -115,3 +115,35 @@
 - 树崩溃时显示退出码并停住窗口
 
 无破坏性；删掉即无影响。
+
+---
+
+## 变更 #5 — 2026-11-08：树预设 persona 更新（战术包 / tree_recipes / execMode）
+
+### 为什么
+
+树侧新增了 LLM 可见能力：
+
+- `tree_recipes`：只读查配方（JEI 式）/ 当前背包能做什么；
+- `tree_skills`：现在同时列出**战术包**（`tactic.*`）；
+- `tree_goal`：支持 `skill:"tactic"`，并拒绝未知技能/战术；
+- `tree_status`：新增执行档位 `execMode/execReason`（safe-batch / field-guarded）。
+
+### 改了什么
+
+文件：`C:\Users\Lihao\.dsh\profiles\desktop\cordis.patch.yml`（预设「外接大脑（Numen 树）」的 persona）
+
+1. 工具列表：更新 `tree_status`/`tree_skills`/`tree_goal` 说明，新增 `tree_recipes`；
+2. 下目标的规矩：新增"战术包只用于单步可中断动作"、"field-guarded 时不下长生产任务"；
+3. 原有"不要微操"原则不变。
+
+备份：`cordis.patch.yml.bak-before-tree-tactics-20261108-210041`
+
+### 影响 / 注意
+
+- **MCP 工具列表在会话建立时发现**：已打开的旧 DSH 会话看不到 `tree_recipes`/新描述；需要**新建会话**（必要时重启 DSH）。
+- 本次只改 persona 文本，未改 MCP 连接配置（`url: http://127.0.0.1:8767/mcp` 不变）。
+
+### 回滚
+
+把备份文件复制回去，重启 DSH。

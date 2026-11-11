@@ -72,12 +72,12 @@ local ok, r = pcall(function()
     if step < 1 then break end
     if step <= 4 then
       -- 最后几格：直接走到目标点（分小段会因为"range=2 视为已到达"而原地打转）
-      pcall(numen.move.to, { x = target.x, y = target.y or me.y, z = target.z }, { arrive = "near", range = RANGE })
+      pcall(numen.move.to, { x = target.x, y = target.y or me.y, z = target.z }, { arrive = "near", range = RANGE, avoid = { "water", "flowing_water" } })
     else
       local wx = me.x + (target.x - me.x) / d * step
       local wz = me.z + (target.z - me.z) / d * step
       -- 不主动爬升/下降（路点 y 用当前层），避免"目标高两格就永远走不到"
-      pcall(numen.move.to, { x = wx, y = me.y, z = wz }, { arrive = "near", range = 1 })
+      pcall(numen.move.to, { x = wx, y = me.y, z = wz }, { arrive = "near", range = 1, avoid = { "water", "flowing_water" } })
     end
     local after = numen.status.self().pos
     local nd = distTo(after, target)

@@ -3,7 +3,7 @@ loaderVersion = "[4,)"
 license = "MIT"
 [[mods]]
 modId = "numenlockfix"
-version = "1.1.0"
+version = "1.2.0"
 displayName = "Numen Lock Fix"
 authors = "local"
 description = '''清理 numen 在切换存档后残留的程序锁（JVM 静态 RUNNING 表）。不修改 numen 本体，删除本 jar 即回滚。'''

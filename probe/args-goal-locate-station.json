@@ -1,0 +1,1 @@
+{"companion": "bigWhale", "skill": "tactic", "priority": 60, "params": {"tactic": "locate_station", "params": {"block": "minecraft:crafting_table", "radius": 24}}}

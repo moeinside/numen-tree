@@ -1,0 +1,50 @@
+{
+  "version": "p0-fixture-1",
+  "description": "P0 fixed acceptance world (not a natural world). No LLM, player zero intervention.",
+  "minecraft": "1.21.1",
+  "seed": "p0-fixed-1",
+  "setup": {
+    "flatGround": true,
+    "spawnNearBase": true,
+    "baseAnchor": { "x": 0, "y": 64, "z": 0 },
+    "tree": { "type": "minecraft:oak_log", "count": 1, "radius": 16 },
+    "ironOre": { "type": "minecraft:iron_ore", "count": 3, "radius": 24 },
+    "coalOre": { "type": "minecraft:coal_ore", "count": 1, "radius": 24 },
+    "nightZombies": 1,
+    "starterInventory": {
+      "minecraft:wooden_pickaxe": 1,
+      "minecraft:stone_pickaxe": 1,
+      "minecraft:bread": 4
+    },
+    "chest": null
+  },
+  "acceptance": {
+    "durationGameDays": 2,
+    "playerIntervention": 0,
+    "llm": false,
+    "milestones": [
+      "M1 stone_pickaxe",
+      "M2 furnace placed",
+      "M3 mine 3 raw_iron"
+    ],
+    "metrics": {
+      "deaths": { "max": 0 },
+      "resumeJitterPerMinute": { "max": 2 },
+      "staleFactUses": { "max": 0 },
+      "unknownAsFalse": { "max": 0 },
+      "settleReobserveCoverage": { "min": 1 },
+      "observationOverBudget": { "max": 0 },
+      "nightOutdoorTasks": { "max": 0 },
+      "replaySideEffects": { "max": 0 }
+    }
+  },
+  "killPoints": [
+    "after_checkpoint_trace_flush_before_next_action_begin"
+  ],
+  "frozen": {
+    "fixtureVersion": "p0-fixture-1",
+    "auditVersion": "p0-audit-1",
+    "thresholdsFrozenAt": "2026-11-10T00:00:00Z",
+    "note": "Freeze fixture/audit/thresholds/denominator/sampling window/kill point before runs. Changing after run = not passed."
+  }
+}

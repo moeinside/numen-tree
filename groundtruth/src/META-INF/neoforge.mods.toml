@@ -1,0 +1,21 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+[[mods]]
+modId = "numen_groundtruth"
+version = "0.1.0"
+displayName = "Numen Tree GroundTruth (observability + controlled debug)"
+authors = "local"
+description = '''Dev-only observability and controlled-debug mod: loopback HTTP, bearer token, audit, test-world allowlist. Disabled by default; not for production worlds.'''
+[[dependencies.numen_groundtruth]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.233,)"
+ordering = "NONE"
+side = "BOTH"
+[[dependencies.numen_groundtruth]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1, 1.21.2)"
+ordering = "NONE"
+side = "BOTH"

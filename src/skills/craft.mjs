@@ -127,6 +127,11 @@ local COUNT = ${count}
 local LOGS = ${luaArray(LOG_ITEMS)}
 local PLANKS = ${luaArray(PLANK_ITEMS)}
 
+-- 链式分支内用的失败 helper（不能依赖全局 fail；numen 只暴露 numen.* API）
+local function fail(kind, message, hint)
+  error({ kind = kind, message = message, hint = hint })
+end
+
 local function cnt(it)
   local ok, v = pcall(numen.inv.count, it)
   if not ok then return 0 end

@@ -53,6 +53,21 @@ lines/
 | `fled` | mod 的逃跑反射触发 |
 | `death` | 死亡事件 |
 | `companion_missing` | 换档后找不到同伴 |
+| `task_start` | 计划/任务开始（槽 `{title}`） |
+| `tactic_done` | 战术包成功（内容未打磨） |
+| `low_hp` | HP ≤6 首次提醒（槽 `{hp}`；回 >10 重新武装） |
+| `danger` | 执行档位进入 field-guarded（发现风险） |
+| `craft_done` | **预留**：合成/熔炼完成（暂无触发点） |
+| `milestone` | **预留**：阶段完成（暂无触发点） |
+| `found_new` | **预留**：图鉴发现新物品（默认不接，避免刷屏） |
+
+## 2.1 触发规则（契约）
+
+- 所有触发统一走 `#speak(when, slots)`；**不在这里组织语言**；
+- 触发点只报告"事件 + 槽"，文案由 `lines/*.json` 决定；
+- 没有对应 `when` 条目时静默（`pick` 返回 null），所以**可以先留接口后补文案**；
+- 冷却/权重/最小间隔由 `LineBank` 统一处理（见 §3）；
+- 新增触发点的位置约定：计划开始 → `task_start`；战术结束 → `tactic_done`/`task_failed`；威胁/降档 → `danger`；低血 → `low_hp`。
 
 ## 3. 运行时规则
 

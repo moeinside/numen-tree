@@ -1,4 +1,5 @@
 import { LUA_PRELUDE } from './prelude.mjs';
+import { baseRegions, luaRegions } from '../base-guard.mjs';
 
 /**
  * dig_nearby —— 挖附近的一种方块（**分段挖**：一次最多 countPerChunk 个，挖不完返回 partial）。
@@ -41,11 +42,25 @@ export default {
     const radius = Math.max(4, Number(params.radius ?? 24));
     const per = Math.max(1, Math.min(count, Number(params.countPerChunk ?? 2)));
     const safe = block.replace(/'/g, "\\'");
+    const regions = baseRegions(ctx?.places);
     const code = `${LUA_PRELUDE}
 local BLOCK = '${safe}'
 local WANT = ${count}
 local PER = ${per}
 local RADIUS = ${radius}
+local BASE = ${luaRegions(regions)}
+local function inBase(b)
+  if type(b) ~= "table" then return false end
+  local p = type(b.pos) == "table" and b.pos or b
+  local x, y, z = tonumber(p.x), tonumber(p.y), tonumber(p.z)
+  if x == nil or y == nil or z == nil then return false end
+  for _, r in ipairs(BASE) do
+    if math.abs(x - r.x) <= r.half and math.abs(z - r.z) <= r.half and y >= r.yMin and y <= r.yMax then
+      return true
+    end
+  end
+  return false
+end
 -- 单次程序最多试几个候选：1 次 scan + ≤MAX_TRY 次 dig，远低于 200 次调用上限
 local MAX_TRY = 6
 
@@ -57,16 +72,23 @@ local ok, r = pcall(function()
 
   -- 把所有簇里的方块摊平当候选：scan 只做这一次，后面纯本地排序
   local cand = {}
+  local found, blocked = 0, 0
   for _, c in ipairs(clusters) do
     local list = (type(c) == "table" and (c.blocks or c)) or {}
     if type(list) == "table" then
       for _, b in ipairs(list) do
-        if type(b) == "table" then cand[#cand + 1] = b end
+        if type(b) == "table" then
+          found = found + 1
+          if inBase(b) then blocked = blocked + 1 else cand[#cand + 1] = b end
+        end
       end
     end
   end
-  if #cand == 0 then
+  if found == 0 then
     error({ kind = "not_found", message = "no diggable " .. BLOCK .. " within " .. RADIUS .. " blocks" })
+  end
+  if #cand == 0 then
+    error({ kind = "refused", message = "基地内禁止自主挖掘（" .. blocked .. " 个候选被拒）" })
   end
 
   -- 够得着的排前面，其次由近到远；in_reach/distance 缺省时按"未知"处理（仍可尝试）

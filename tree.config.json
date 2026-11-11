@@ -2,6 +2,10 @@
   "numen": {
     "configPath": "E:/game/HMCL/.minecraft/versions/1.21.1-NeoForge/config/numen/mcp_server.json"
   },
+  "priorityStore": {
+    "file": "runs/priority-state.json",
+    "worldEpoch": 0
+  },
   "control": {
     "host": "127.0.0.1",
     "port": 8766
@@ -28,7 +32,7 @@
     "cooldownSeconds": 30
   },
   "leash": {
-    "enabled": true,
+    "enabled": false,
     "anchor": "home",
     "placeName": "家",
     "maxDistance": 32,
@@ -79,9 +83,15 @@
   "behavior": {
     "mode": "survival",
     "schedule": { "enabled": true },
+    "utility": {
+      "enabled": true,
+      "minIntervalSeconds": 180
+    },
     "instinctHoldSeconds": 8,
+    "instinctStuckSeconds": 30,
     "execPolicy": {
       "enabled": true,
+      "gateLongSkills": true,
       "batchMaxSeconds": 60,
       "quietSeconds": 30,
       "downgradeCooldownSeconds": 60,
@@ -99,6 +109,19 @@
       "port": 8768,
       "unlockAfterBlocked": 2,
       "minIntervalSeconds": 30
+    },
+    "brainRecovery": {
+      "enabled": true,
+      "blockedSeconds": 120,
+      "cooldownSeconds": 300,
+      "maxPerHour": 3,
+      "skipOwnerDangerSeconds": 60
+    },
+    "tentacle": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 8769,
+      "timeoutMs": 2500
     },
     "survival": {
       "retreatHp": 8,
@@ -118,7 +141,9 @@
       "seekSeconds": 40,
       "starvingEscalateSeconds": 180,
       "starvingRepeatSeconds": 180,
-      "starvingHaltSeconds": 240
+      "starvingHaltSeconds": 0,
+      "foodRetrySeconds": 60,
+      "stuckHaltSeconds": 120
     },
     "combat": {
       "radius": 16,

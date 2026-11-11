@@ -1,0 +1,21 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+[[mods]]
+modId = "numen_devtools"
+version = "0.1.0"
+displayName = "Numen Tree DevTools (GM portal)"
+authors = "local"
+description = '''Dev-only GM command portal: loopback HTTP + bearer token + root allowlist + test-world allowlist + audit. Disabled by default; not for production worlds.'''
+[[dependencies.numen_devtools]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1.233,)"
+ordering = "NONE"
+side = "BOTH"
+[[dependencies.numen_devtools]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1, 1.21.2)"
+ordering = "NONE"
+side = "BOTH"

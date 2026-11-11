@@ -1,4 +1,5 @@
 import { LUA_PRELUDE } from './prelude.mjs';
+import { baseRegions, isInsideBase } from '../base-guard.mjs';
 
 /**
  * dig_cells —— 精确挖掉指定格子（只挖给点名的方块），可选顺手捡掉落物。
@@ -30,6 +31,15 @@ export default {
       .filter((c) => c && ['x', 'y', 'z'].every((k) => Number.isFinite(Number(c[k]))))
       .slice(0, 40)
       .map((c) => ({ x: Math.floor(Number(c.x)), y: Math.floor(Number(c.y)), z: Math.floor(Number(c.z)) }));
+    const regions = baseRegions(ctx?.places);
+    const safeCells = clean.filter((c) => !isInsideBase(c, regions));
+    if (!safeCells.length) {
+      return {
+        code: `${LUA_PRELUDE}return F("refused", "基地内禁止自主挖掘", "换到基地外或显式任务")`,
+        timeoutMs: 5000,
+      };
+    }
+    const blocked = clean.length - safeCells.length;
     if (!clean.length) {
       return {
         code: `${LUA_PRELUDE}return F("bad_argument", "缺少 cells 参数", "示例 cells=[{x:-57,y:64,z:101}]")`,
@@ -38,7 +48,7 @@ export default {
     }
     const doCollect = params.collect !== false;
     const doWalk = params.walk === true || params.walk === 'true';
-    const cellsLua = `{ ${clean.map((c) => `{ x = ${c.x}, y = ${c.y}, z = ${c.z} }`).join(', ')} }`;
+    const cellsLua = `{ ${safeCells.map((c) => `{ x = ${c.x}, y = ${c.y}, z = ${c.z} }`).join(', ')} }`;
 
     const code = `${LUA_PRELUDE}
 -- skill: dig_cells

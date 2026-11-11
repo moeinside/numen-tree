@@ -12,6 +12,7 @@
 1. **能交给 node 做的，就不要用 PowerShell 拼字符串**：传 JSON、写文件、读日志、发 HTTP，一律走项目里的小脚本（`probe/mcp.mjs`、`probe/tree-api.mjs`、`node -e`）。
 2. **任何"中文 + 文件写入"都不要用 `Set-Content` / `Copy-Item` / `>`**：用编辑工具，或 `[IO.File]::WriteAllText(..., UTF8Encoding($false))`。
 3. **原生程序的参数用 `Start-Process -ArgumentList @(...)` 数组传**，别让 PowerShell 重新解析。
+4. **同一问题连续排障失败两次 → 先停下来扫一眼本总表，再继续。** 尤其是 BOM、引号、编码、端口、lease、日志截断这几类。
 
 ---
 
@@ -86,6 +87,41 @@ Get-Content a.json | Set-Content b.json
 # ✅ 工具（推荐）：write/edit
 # ✅ 必须用 PowerShell 时：
 [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+```
+
+#### 案例：groundtruth 配置 BOM → 整个 mod 静默 disabled
+
+2026-11-12 实测：
+
+```text
+config/numen-groundtruth.json 首字节 EF BB BF
+→ Java Json.parse 失败
+→ DevToolsConfig.load 抛异常
+→ portal 直接 disabled，8771 不监听
+→ 没有 audit、没有明显报错
+```
+
+检查：
+
+```powershell
+$b=[IO.File]::ReadAllBytes($path)
+($b[0..2] | ForEach-Object { $_.ToString('X2') }) -join ' '
+# EF BB BF = 有 BOM
+```
+
+双保险：
+
+```text
+1) 写侧：配置/JSON 一律 UTF8Encoding($false)，禁止 Set-Content -Encoding UTF8 / >
+2) 读侧：JSON parser 先剥 \uFEFF（groundtruth Json.parse 已加）
+3) 工具自检：JSON 文件首字节 + ConvertFrom-Json 双检
+```
+
+教训：
+
+```text
+BOM 不会让游戏崩，只会让配置"看起来存在但读不到"；
+这种静默失败比报错更贵。
 ```
 
 ### 2.2 读 UTF-8 中文文件：`Get-Content` 默认编码
@@ -265,3 +301,55 @@ Select-String -Path $f -Pattern 'numen-program|numenlockfix' | Select-Object -La
 | 输出里夹 `CategoryInfo` | `2>&1` 混流 | `Select-String -NotMatch ...` 过滤 |
 | 字段看起来"丢了" | `Format-Table -AutoSize` 截断 | `Format-List` / 交给 node 解析 |
 | 树进程被杀后游戏里一直"a program is already running" | 在途 lua 被遗弃 | `control --op exit`；已留锁则重建同伴或 `/numenlockfix` |
+
+---
+
+## 7. 诊断/验收卡点：waiting 不是 contradiction
+
+### 症状
+
+    诊断工具一直输出 waiting
+    看不到 contradiction
+    于是以为“自动矛盾判定没写/坏了”
+
+### 先分清
+
+    waiting:
+      plan suspended
+      或 waitUntil > 0
+      或 actionLock 有主
+      或 gateReason 明确
+      → 这是合法等待，不是 bug
+
+    contradiction:
+      plan active
+      + current 为空
+      + 无 wait
+      + 无 actionLock
+      + 持续 >= 2s
+      → 才是“计划说在跑，实际没动作”
+
+### 为什么真实世界很难看到
+
+    树通常立刻派动作，或被 gate 挂起
+    “active 但完全没动作”窗口很短
+    自然跑很难稳定触发
+
+### 不要做
+
+    不要为了看 contradiction 反复造真实夹具
+    不要因为 waiting 多就改判定
+    不要把“未观测到”当成“功能坏了”
+
+### 正确姿势
+
+    1) 先看 /status 的 wait / currentMissing / actionLock
+    2) 测试态已覆盖自动 contradiction（diagnose selftest）
+    3) 真实样本未观测 → 记为已知限制，不阻塞主线
+    4) 真需要真实证据时，用测试态注入，不硬造世界
+
+### 一句话
+
+    waiting 是“有理由不动”；
+    contradiction 是“没理由不动却说自己在动”。
+    别把前者当后者，也别为后者无限造夹具。

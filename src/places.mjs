@@ -24,7 +24,7 @@ import path from 'node:path';
  * }
  */
 
-export const PLACE_KINDS = ['base', 'death', 'owner', 'poi', 'custom'];
+export const PLACE_KINDS = ['base', 'death', 'owner', 'poi', 'custom', 'shelter'];
 export const DEFAULT_MAX_ENTRIES = 500;
 
 const KIND_LABELS = {
@@ -33,6 +33,7 @@ const KIND_LABELS = {
   owner: '主人位置',
   poi: '地点',
   custom: '地点',
+  shelter: '避难所',
 };
 
 const SOURCES = ['tree', 'llm', 'cli'];
@@ -62,10 +63,14 @@ const ALIASES = {
     strong: ['地方', '地点', '位置', 'place', 'spot', 'poi'],
     weak: ['那儿', '那里', '这儿', '这里', '那边', '这边'],
   },
+  shelter: {
+    strong: ['避难所', '避难', '躲避处', 'shelter', 'refuge'],
+    weak: [],
+  },
 };
 
 /** 同一轮命中多个类型时的优先级：死 > 基地 > 主人 > 地点。 */
-const KIND_PRIORITY = ['death', 'base', 'owner', 'poi'];
+const KIND_PRIORITY = ['death', 'base', 'owner', 'poi', 'shelter'];
 
 /** 时间词：取同类（或全部）最新一条。长的放前面，why 里显示命中的原词。 */
 const TIME_WORDS = [
@@ -232,6 +237,7 @@ function clonePlace(place) {
     note: place.note ?? '',
     source: place.source ?? 'llm',
     companion: place.companion ?? null,
+    radius: place.radius ?? null,
     createdAt: place.createdAt,
   };
 }
@@ -248,6 +254,7 @@ function normalizeEntry(entry) {
     note: String(entry?.note ?? ''),
     source: normalizeSource(entry?.source),
     companion: entry?.companion == null ? null : String(entry.companion),
+    radius: entry?.radius == null ? null : Math.max(1, Math.min(128, Number(entry.radius) || 0)),
     createdAt: Number.isFinite(t) ? new Date(t).toISOString() : nowIso,
   };
 }
@@ -401,7 +408,7 @@ export class PlaceBook {
   }
 
   /** 记一个地点。kind 不合法 → custom；位置非法 → pos 为 null（调用方应自行校验）。 */
-  record({ name, kind, dimension, pos, note, source, companion } = {}) {
+  record({ name, kind, dimension, pos, note, source, companion, radius } = {}) {
     const k = normalizeKind(kind);
     const place = {
       id: (() => {
@@ -415,6 +422,7 @@ export class PlaceBook {
       note: String(note ?? ''),
       source: normalizeSource(source),
       companion: companion == null ? null : String(companion),
+      radius: radius == null ? null : Math.max(1, Math.min(128, Number(radius) || 0)),
       createdAt: new Date().toISOString(),
     };
     this.places.push(place);

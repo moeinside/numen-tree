@@ -1,0 +1,44 @@
+{
+  "version": "p0-natural-fixture-1",
+  "description": "Natural random world fixture; no hand-placed resources.",
+  "worldName": "numen-test",
+  "seed": "01",
+  "mode": "survival",
+  "difficulty": "normal",
+  "companion": "bigWhale",
+  "spawn": { "x": 52, "y": 62, "z": 155 },
+  "scan": {
+    "radius": 48,
+    "logs": [{ "type": "minecraft:oak_log", "x": 83, "y": 68, "z": 155, "cluster": 5 }],
+    "waterClusters": 9,
+    "passiveAnimals": 7,
+    "ores": [
+      { "type": "minecraft:iron_ore", "x": 68, "y": 48, "z": 153, "cluster": 19 },
+      { "type": "minecraft:iron_ore", "x": 51, "y": 41, "z": 161, "cluster": 4 },
+      { "type": "minecraft:iron_ore", "x": 71, "y": 52, "z": 162, "cluster": 2 },
+      { "type": "minecraft:coal_ore", "x": 60, "y": 57, "z": 155, "cluster": 14 },
+      { "type": "minecraft:coal_ore", "x": 54, "y": 52, "z": 156, "cluster": 10 }
+    ]
+  },
+  "acceptance": {
+    "durationGameDays": 2,
+    "playerIntervention": 0,
+    "llm": false,
+    "metrics": {
+      "deaths": { "max": 1, "continueAfterDeath": true },
+      "resumeJitterPerMinute": { "max": 2 },
+      "sameCauseRetries": { "max": 3 },
+      "busyNoProgressSeconds": { "max": 90 },
+      "nightOutdoorTasks": { "max": 0 },
+      "milestonesAdvanced": { "min": 1 },
+      "staleFactUses": { "max": 0 },
+      "unknownAsFalse": { "max": 0 },
+      "observationOverBudget": { "max": 0 }
+    }
+  },
+  "frozen": {
+    "fixtureVersion": "p0-natural-fixture-1",
+    "auditVersion": "p0-audit-1",
+    "thresholdsFrozenAt": "2026-11-10T00:00:00Z"
+  }
+}

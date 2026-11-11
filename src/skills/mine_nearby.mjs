@@ -1,4 +1,5 @@
 import { LUA_PRELUDE } from './prelude.mjs';
+import { baseRegions, luaRegions } from '../base-guard.mjs';
 
 /**
  * mine_nearby —— 挖附近一簇方块里的一小批：用 `numen.work.mine(cluster)`（自带"走近→挖→捡"）。
@@ -89,6 +90,19 @@ local WANT = ${count}
 local RADIUS = ${radius}
 local MAX_CLUSTERS = ${maxClusters}
 local PER = ${per}
+local BASE = ${luaRegions(baseRegions(ctx?.places))}
+local function inBase(b)
+  if type(b) ~= "table" then return false end
+  local p = type(b.pos) == "table" and b.pos or b
+  local x, y, z = tonumber(p.x), tonumber(p.y), tonumber(p.z)
+  if x == nil or y == nil or z == nil then return false end
+  for _, r in ipairs(BASE) do
+    if math.abs(x - r.x) <= r.half and math.abs(z - r.z) <= r.half and y >= r.yMin and y <= r.yMax then
+      return true
+    end
+  end
+  return false
+end
 
 local function cnt(it)
   local ok, v = pcall(numen.inv.count, it)
@@ -102,6 +116,7 @@ local ok, r = pcall(function()
     error({ kind = "not_found", message = "no " .. BLOCK .. " within " .. RADIUS .. " blocks" })
   end
   local before = cnt(ITEM)
+  local blockedTotal = 0
 
   local tried, lastErr = 0, nil
   for i = 1, #clusters do
@@ -123,7 +138,11 @@ local ok, r = pcall(function()
     local subset = {}
     for j = 1, #list do
       if #subset >= takeN then break end
-      subset[#subset + 1] = list[j]
+      if inBase(list[j]) then
+        blockedTotal = blockedTotal + 1
+      else
+        subset[#subset + 1] = list[j]
+      end
     end
     if #subset > 0 then
       local target = subset
@@ -137,6 +156,9 @@ local ok, r = pcall(function()
 
   local mined = cnt(ITEM) - before
   if mined < 0 then mined = 0 end
+  if mined <= 0 and blockedTotal > 0 then
+    error({ kind = "refused", message = "基地内禁止自主挖掘（" .. blockedTotal .. " 个候选被拒）" })
+  end
   if mined <= 0 then
     error({ kind = "out_of_reach",
       message = "mined nothing in " .. tried .. " cluster(s): " .. tostring(lastErr),

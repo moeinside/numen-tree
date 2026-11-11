@@ -1,6 +1,14 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { inferKind, normalizeKind, distanceBetween, normalizeText } from './places.mjs';
+import { getSkill, listSkills } from './skills/index.mjs';
+import { getTactic, TACTICS } from './tactics.mjs';
+import { getStrategy, STRATEGIES } from './strategy.mjs';
+import { buildAtom } from './atoms.mjs';
+import { summarizePerception } from './tentacle.mjs';
+import { activeIntents } from './intents.mjs';
+import { describeDrives } from './drives.mjs';
+import { describeLearning } from './learning.mjs';
 
 const PROTOCOL_VERSION = '2025-06-18';
 
@@ -8,7 +16,7 @@ const PROTOCOL_VERSION = '2025-06-18';
  * 树对 LLM 的 MCP 工具面。
  *
  * 设计纪律：
- *  - 工具少（当前 10 个），每个都粗粒度；
+ *  - 工具少（当前 9 个），每个都粗粒度；
  *  - 返回的是"压缩过后的事实"，不是原始数据；
  *  - 只有 tree_wait 是长轮询，其余都是瞬时返回。
  */
@@ -22,6 +30,7 @@ export function createTreeMcpServer({
   skills,
   places,
   startTask,
+  tentacle,
 }) {
   const sessions = new Set();
 
@@ -187,7 +196,11 @@ export function createTreeMcpServer({
 
   const summaryLine = (st) => {
     const p = progressOf(st);
-    const pos = st.pos ? `${st.pos.x.toFixed(1)},${st.pos.y.toFixed(1)},${st.pos.z.toFixed(1)}` : '?';
+    const pos = st.pos
+      ? `${st.pos.x.toFixed(1)},${st.pos.y.toFixed(1)},${st.pos.z.toFixed(1)}`
+      : st.instinctBlocked || Date.now() < (st.instinctBusyUntil || 0)
+        ? '未知（本能在动，观测被占）'
+        : '?';
     // 任务行以 current 为准：观测循环被长任务占住时 taskStatus 可能是旧值/空
     const task = p.current_skill
       ? `执行中 ${p.current_skill}(已 ${p.running_seconds ?? 0}s)`
@@ -198,17 +211,26 @@ export function createTreeMcpServer({
           : '空闲';
     const queue = st.goals.filter((g) => g.status === 'pending' || g.status === 'running');
     const blocked = st.slotBlocked >= 3 ? ` | ⚠️ Lua槽被占用(${st.slotBlocked}次)` : '';
+    const exec =
+      st.execMode === 'field-guarded'
+        ? ` | 🛡️ field-guarded(${st.execReason ?? '?'})`
+        : '';
+    const storm =
+      st.reflexSince && Date.now() - st.reflexSince >= 15_000
+        ? ` | ⚠️ 本能连续逃跑 ${Math.round((Date.now() - st.reflexSince) / 1000)}s`
+        : '';
     const last = p.last_action
       ? ` | 上一步 ${p.last_action.skill} ${p.last_action.ok ? '成功' : `失败:${p.last_action.kind ?? '?'}`}`
       : '';
+    const help = st.helpNeeded?.hint ? ` | 需要你：${st.helpNeeded.hint}` : '';
     const plan = planText(planOf(st));
     return (
       [
         `${st.name}: ${pos} ${st.dimension ?? ''}`.trim(),
         `HP ${st.hp ?? '?'} 饥饿 ${st.hunger ?? '?'} 模式 ${st.mode}${st.paused ? ' 已暂停' : ''}`,
         `任务 ${task}`,
-        `队列 ${queue.length ? queue.map((g) => g.skill).join('->') : '空'}${blocked}`,
-      ].join(' | ') + (plan ? ` | ${plan}` : '') + last
+        `队列 ${queue.length ? queue.map((g) => g.skill).join('->') : '空'}${blocked}${exec}${storm}`,
+      ].join(' | ') + (plan ? ` | ${plan}` : '') + last + help
     );
   };
 
@@ -345,6 +367,20 @@ export function createTreeMcpServer({
       },
     },
     {
+      name: 'tree_world',
+      description:
+        '只读触手感知：同伴自身/附近实体/地标/光照/时间。' +
+        '不依赖 Lua 槽，树被内置脑占住时也能看；默认返回压缩摘要，detail=true 才展开少量列表。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          companion: { type: 'string', description: '同伴名；只有一个时可省略' },
+          detail: { type: 'string', enum: ['brief', 'entities', 'landmarks'], description: '默认 brief' },
+          radius: { type: 'number', description: '感知半径，默认 16，最大 48' },
+        },
+      },
+    },
+    {
       name: 'tree_task',
       description:
         '把一句任务意图交给树（可以直接用主人的原话，如"把木头存了""回家过夜""去砍点木头"）——树按配方表匹配，自动分步执行，不逐步叫你。' +
@@ -373,19 +409,43 @@ export function createTreeMcpServer({
     },
     {
       name: 'tree_skills',
-      description: '列出树能执行的四项技能卡（做什么、参数是什么）。下目标前不确定就用它。',
+      description:
+        '列出树的技能卡 + 战术包 + 战略包（做什么、参数是什么）。下目标前不确定就用它。' +
+        '战术包：tree_goal(skill="tactic", params={tactic:"tactic.xxx", params:{...}})）；战略包：skill="strategy", params={strategy:"strategy.xxx", params:{...}}。',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    },
+    {
+      name: 'tree_recipes',
+      description:
+        '只读：查配方。给 item 返回该物品的所有配方（JEI 式）；不给 item 返回当前背包材料能做什么。' +
+        '不会移动/合成，只查询；槽被树的长动作占用时会明确报 busy。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          companion: { type: 'string', description: '同伴名；不给用第一个同伴' },
+          item: {
+            type: 'string',
+            description: '物品 id，如 minecraft:wooden_sword；不给则返回当前可做清单',
+          },
+        },
+        additionalProperties: false,
+      },
     },
     {
       name: 'tree_goal',
       description:
-        '给同伴下一个任务（技能卡 + 参数）。立即返回，不阻塞。任务结束后会在 tree_wait / tree_inbox 里出现。',
+        '给同伴下一个任务（技能卡或战术包）。立即返回，不阻塞。任务结束后会在 tree_wait / tree_inbox 里出现。' +
+        '战术包写法：skill="tactic", params={tactic:"tactic.query_recipes", params:{...}}；战略包写法：skill="strategy", params={strategy:"strategy.make_item", params:{...}}；可用列表见 tree_skills。',
       inputSchema: {
         type: 'object',
         properties: {
           companion: { type: 'string', description: '同伴名' },
-          skill: { type: 'string', description: '技能 id，见 tree_skills' },
-          params: { type: 'object', description: '技能参数', additionalProperties: true },
+          skill: { type: 'string', description: '技能 id 或 tactic（见 tree_skills）' },
+          params: {
+            type: 'object',
+            description: '技能参数；tactic 时是 {tactic, params}',
+            additionalProperties: true,
+          },
           priority: { type: 'number', description: '优先级，大的先做，默认 0' },
         },
         required: ['companion', 'skill'],
@@ -574,6 +634,18 @@ export function createTreeMcpServer({
             foodCount: st.foodCount,
             weapon: st.weapon,
             animalCount: st.animalCount,
+            timePhase: st.timePhase ?? null,
+            tentacleDayTime: st.tentacleDayTime ?? null,
+            intentState: st.intentState ?? null,
+            helpNeeded: st.helpNeeded ?? null,
+            readiness: st.readiness ?? null,
+            drives: st.drives ? describeDrives(st.drives) : null,
+            learning: st.learning ? describeLearning(st.learning) : null,
+            attention: st.attention ?? null,
+            instinct: st.instinct ?? null,
+            // 优先度 MVP 可观测：当前活着的意图 + 计划意图
+            intents: [...activeIntents(st)],
+            planIntent: planOf(st)?.recipeId ?? null,
             // 背包概览（最多 24 种 {item,count}）：LLM 挑方块/材料用
             inventory: st.inventory ?? [],
             task: st.taskStatus,
@@ -606,6 +678,20 @@ export function createTreeMcpServer({
           };
         });
         return text({ now, inboxSeq: inbox.seq, companions });
+      }
+
+      case 'tree_world': {
+        const lane =
+          (args.companion ? laneOf(args.companion) : [...lanes.values()][0]) || null;
+        if (!lane) return text({ ok: false, error: '没有这个同伴' }, true);
+        if (!tentacle) return text({ ok: false, error: 'tentacle 未启用（config.tentacle.enabled）' }, true);
+        const radius = Math.max(4, Math.min(48, Number(args.radius ?? 16)));
+        const p = await tentacle.perception({ uuid: lane.state.id, radius });
+        const summary = summarizePerception(p, { detail: args.detail || 'brief' });
+        if (!summary.ok) {
+          summary.hint = '触手 mod 没在跑：确认 mods/numen-tree-tentacle-*.jar 已安装且游戏重启，端口 8769 已监听。';
+        }
+        return text(summary, !summary.ok);
       }
 
       case 'tree_task': {
@@ -690,10 +776,75 @@ export function createTreeMcpServer({
       }
 
       case 'tree_skills': {
-        const list = skills()
+        const skillText = skills()
           .map((s) => `- ${s.id}：${s.title}\n  参数：${JSON.stringify(s.params)}`)
           .join('\n');
-        return text(list);
+        const tacticText = Object.values(TACTICS)
+          .map((t) => `- ${t.id}：${t.title}\n  参数：${JSON.stringify(t.params ?? {})}`)
+          .join('\n');
+        const strategyText = Object.values(STRATEGIES)
+          .map((s) => `- ${s.id}：${s.title}\n  参数：${JSON.stringify(s.params ?? {})}`)
+          .join('\n');
+        return text(
+          `【技能卡】\n${skillText}\n\n【战术包（tree_goal skill="tactic"）】\n${tacticText}\n\n【战略包（tree_goal skill="strategy"）】\n${strategyText}`,
+        );
+      }
+
+      case 'tree_recipes': {
+        const lane = laneOf(args.companion) || [...lanes.values()][0];
+        if (!lane) return text('没有同伴', true);
+        const item = String(args.item || '').trim();
+        const built = buildAtom(item ? 'recipe_query' : 'craftable_query', item ? { item } : {});
+        let last = null;
+        for (let i = 0; i < 4; i += 1) {
+          last = await numen.lua(lane.state.name, built.code, built.timeoutMs + 2000);
+          const msg = String(last?.message ?? last?.value ?? '');
+          if (!/already running/i.test(msg)) break;
+          await new Promise((r) => setTimeout(r, 700));
+        }
+        const busy = /already running/i.test(String(last?.message ?? last?.value ?? ''));
+        if (busy) {
+          return text(
+            {
+              ok: false,
+              reason: 'slot_blocked',
+              message: 'Lua 槽被树正在执行的动作占用，稍后再查（或先 tree_status 看进度）',
+            },
+            true,
+          );
+        }
+        if (last?.kind !== 'returned') {
+          return text({ ok: false, kind: last?.kind, message: last?.message }, true);
+        }
+        let v = last.value;
+        if (typeof v === 'string') {
+          try {
+            v = JSON.parse(v);
+          } catch {
+            /* keep */
+          }
+        }
+        if (v && Number(v.count) > 0) {
+          const recipes = [];
+          for (let i = 1; i <= Math.min(Number(v.count), 12); i += 1) {
+            const p = `r${i}_`;
+            if (v[`${p}id`] == null) break;
+            recipes.push({
+              id: v[`${p}id`],
+              station: v[`${p}station`],
+              item: v[`${p}item`],
+              makes: v[`${p}makes`],
+              ingredients: String(v[`${p}ingredients`] || '')
+                .split('|')
+                .filter(Boolean),
+            });
+          }
+          v.recipes = recipes;
+          for (const k of Object.keys(v)) if (/^r\d+_/.test(k)) delete v[k];
+        } else if (v && Number(v.count) === 0) {
+          v.recipes = [];
+        }
+        return text({ ok: true, kind: item ? 'recipes' : 'craftable', companion: lane.state.name, ...(v || {}) });
       }
 
       case 'tree_goal': {
@@ -713,6 +864,43 @@ export function createTreeMcpServer({
         }
         const skill = String(args.skill || '');
         const params = args.params || {};
+        if (skill === 'tactic') {
+          const tid = params?.tactic;
+          if (!tid || !getTactic(tid)) {
+            return text(
+              {
+                ok: false,
+                reason: 'unknown_tactic',
+                message: `没有这个战术包：${tid ?? '(缺 params.tactic)'}`,
+                available: Object.keys(TACTICS).map((k) => `tactic.${k}`),
+              },
+              true,
+            );
+          }
+        } else if (skill === 'strategy') {
+          const sid = params?.strategy;
+          if (!sid || !getStrategy(sid)) {
+            return text(
+              {
+                ok: false,
+                reason: 'unknown_strategy',
+                message: `没有这个战略包：${sid ?? '(缺 params.strategy)'}`,
+                available: Object.keys(STRATEGIES).map((k) => `strategy.${k}`),
+              },
+              true,
+            );
+          }
+        } else if (!getSkill(skill)) {
+          return text(
+            {
+              ok: false,
+              reason: 'unknown_skill',
+              message: `没有这个技能：${skill}`,
+              available: skills().map((s) => s.id),
+            },
+            true,
+          );
+        }
         // 去重：同样的技能+参数已经在排队就不重复加（LLM 容易重复下同一条）
         const key = JSON.stringify(params);
         const dup = st.goals.find(

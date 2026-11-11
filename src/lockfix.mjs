@@ -7,9 +7,11 @@
  *   GET  /status                     → 补丁版本 / 反射是否找到类 / 当前锁条目
  *   POST /unlock?uuid=<uuid>         → 清一个同伴的锁
  *   POST /unlock?all=1               → 清全部锁
+ *   POST /reset-brain?uuid=<uuid>    → 清内置脑/任务槽（v1.2 新增，不删实体/不丢背包）
+ *   POST /reset-brain?all=1          → 清所有同伴的内置脑/任务槽
  *
  * 这是"外部手段"：不需要玩家在游戏里敲命令，也不需要重建同伴（不丢背包）。
- * 树侧只在**报错两次**后自动调用；补丁没装/没重启游戏时优雅降级（返回 ok:false）。
+ * 树侧只在**报错两次**后自动调用 unlock；reset-brain 只在显式请求时使用。
  */
 
 export class LockFixClient {
@@ -60,6 +62,15 @@ export class LockFixClient {
     else if (uuid) q.set('uuid', String(uuid));
     else return { ok: false, error: 'unlock 需要 uuid 或 all=1' };
     return this.#request(`/unlock?${q.toString()}`, { method: 'POST' });
+  }
+
+  /** 清内置脑/任务槽（v1.2）：{ok, reset, players}；不删实体、不丢背包。 */
+  async resetBrain({ uuid = null, all = false } = {}) {
+    const q = new URLSearchParams();
+    if (all) q.set('all', '1');
+    else if (uuid) q.set('uuid', String(uuid));
+    else return { ok: false, error: 'reset-brain 需要 uuid 或 all=1' };
+    return this.#request(`/reset-brain?${q.toString()}`, { method: 'POST' });
   }
 }
 

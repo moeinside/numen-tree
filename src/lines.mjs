@@ -134,4 +134,7 @@ export const KIND_WORDS = {
   owner_offline: '你不在',
   bad_argument: '没听明白',
   failed: '没成',
+  no_food_night: '夜里不跑远',
+  chest_too_far: '箱子太远',
+  refused: '不能在这挖',
 };

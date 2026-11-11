@@ -22,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
@@ -50,15 +51,26 @@ import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 @Mod("numenlockfix")
 public final class NumenLockFix {
 
-    private static final String VERSION = "1.1.0";
+    private static final String VERSION = "1.2.0";
     private static final String CLS = "com.dwinovo.numen.program.ServerPrograms";
     private static final String FIELD = "RUNNING";
+    private static final String DISPATCH_CLS = "com.dwinovo.numen.task.CompanionTickDispatcher";
+    private static final String PLAYER_CLS = "com.dwinovo.numen.entity.NumenPlayer";
+    private static final String PERSIST_CLS = "com.dwinovo.numen.task.TaskPersistence";
     private static final int DEFAULT_PORT = 8768;
 
     private static volatile MinecraftServer server;
     private static Class<?> programsClass;
     private static Field runningField;
+    private static Class<?> dispatcherClass;
+    private static Class<?> playerClass;
+    private static Class<?> persistenceClass;
+    private static Method cancelForMethod;
+    private static Method clearActiveTaskMethod;
+    private static Method forgetMethod;
+    private static Method findByUuidMethod;
     private static String lastFindError = "";
+    private static String lastBrainError = "";
     private static boolean findTried = false;
     private static ServerSocket httpSocket;
     private static volatile int httpPort = DEFAULT_PORT;
@@ -162,6 +174,144 @@ public final class NumenLockFix {
 
     private static void addLoader(Set<ClassLoader> set, ClassLoader cl) {
         if (cl != null) set.add(cl);
+    }
+
+    // ── 反射：CompanionBrain 任务清理（v1.2 新增）────────────
+
+    private static synchronized boolean ensureBrain() {
+        if (dispatcherClass != null && cancelForMethod != null) return true;
+        Set<ClassLoader> loaders = new LinkedHashSet<>();
+        addLoader(loaders, NumenLockFix.class.getClassLoader());
+        addLoader(loaders, Thread.currentThread().getContextClassLoader());
+        for (String anchor : new String[] {
+            "com.dwinovo.numen.entity.NumenPlayer",
+            "com.dwinovo.numen.core.NumenCore",
+            "com.dwinovo.numen.task.CompanionTickDispatcher",
+        }) {
+            try {
+                addLoader(loaders, Class.forName(anchor).getClassLoader());
+            } catch (Throwable ignored) {
+                // 类名变化 / 没装：继续
+            }
+        }
+        StringBuilder tried = new StringBuilder();
+        for (ClassLoader cl : loaders) {
+            if (cl == null) continue;
+            try {
+                Class<?> d = Class.forName(DISPATCH_CLS, true, cl);
+                Class<?> p = Class.forName(PLAYER_CLS, true, cl);
+                Class<?> ps = Class.forName(PERSIST_CLS, true, cl);
+                Method cancel = d.getMethod("cancelFor", p);
+                Method clear = d.getMethod("clearActiveTask", p);
+                Method forget = ps.getMethod("forget", p);
+                Method findByUuid = p.getMethod("findByUuid", MinecraftServer.class, UUID.class);
+                dispatcherClass = d;
+                playerClass = p;
+                persistenceClass = ps;
+                cancelForMethod = cancel;
+                clearActiveTaskMethod = clear;
+                forgetMethod = forget;
+                findByUuidMethod = findByUuid;
+                log("brain 反射成功：loader=" + cl.getClass().getName());
+                return true;
+            } catch (Throwable t) {
+                tried.append(cl.getClass().getSimpleName()).append("→").append(t.getClass().getSimpleName()).append("; ");
+            }
+        }
+        lastBrainError = tried.length() == 0 ? "没有可用的类加载器" : tried.toString();
+        return false;
+    }
+
+    /** 找到目标同伴（UUID 为空则所有 NumenPlayer）。 */
+    private static List<Object> findPlayers(UUID id) throws Exception {
+        List<Object> out = new ArrayList<>();
+        MinecraftServer srv = server;
+        if (srv == null) return out;
+        if (id != null && findByUuidMethod != null) {
+            Object p = findByUuidMethod.invoke(null, srv, id);
+            if (p != null) out.add(p);
+        }
+        if (!out.isEmpty()) return out;
+        for (ServerLevel level : srv.getAllLevels()) {
+            for (Entity e : level.getAllEntities()) {
+                if (playerClass != null && playerClass.isInstance(e)) {
+                    if (id == null || e.getUUID().equals(id)) out.add(e);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** 在服务器线程清除同伴的内置脑/任务槽（不删实体、不丢背包）。 */
+    private static String resetBrainJson(Map<String, String> params) {
+        boolean all = "1".equals(params.get("all")) || "true".equalsIgnoreCase(params.get("all"));
+        String uuidStr = params.get("uuid");
+        UUID id = null;
+        if (uuidStr != null && !uuidStr.isBlank()) {
+            try {
+                id = UUID.fromString(uuidStr.trim());
+            } catch (Throwable t) {
+                return "{\"ok\":false,\"error\":\"bad uuid\"}";
+            }
+        }
+        if (!all && id == null) return "{\"ok\":false,\"error\":\"need uuid / all=1\"}";
+        if (!ensureBrain()) {
+            return "{\"ok\":false,\"patch\":\"" + VERSION + "\",\"brainReady\":false,\"error\":\""
+                + escape(lastBrainError) + "\"}";
+        }
+        final UUID target = id;
+        final boolean allFlag = all;
+        int[] result = new int[] { -999 };
+        int[] players = new int[] { 0 };
+        String[] err = new String[] { null };
+        MinecraftServer srv = server;
+        Runnable task = () -> {
+            try {
+                List<Object> list = allFlag ? findPlayers(null) : findPlayers(target);
+                players[0] = list.size();
+                int n = 0;
+                for (Object p : list) {
+                    try {
+                        cancelForMethod.invoke(null, p);
+                        clearActiveTaskMethod.invoke(null, p);
+                        forgetMethod.invoke(null, p);
+                        n += 1;
+                    } catch (Throwable t) {
+                        err[0] = String.valueOf(t);
+                    }
+                }
+                result[0] = n;
+            } catch (Throwable t) {
+                result[0] = -2;
+                err[0] = String.valueOf(t);
+            }
+        };
+        if (srv != null) {
+            CountDownLatch latch = new CountDownLatch(1);
+            srv.execute(() -> {
+                try {
+                    task.run();
+                } finally {
+                    latch.countDown();
+                }
+            });
+            try {
+                latch.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        } else {
+            task.run();
+        }
+        log("http reset-brain uuid=" + target + " all=" + allFlag + " players=" + players[0]
+            + " reset=" + result[0] + (err[0] != null ? " err=" + err[0] : ""));
+        if (result[0] < 0) {
+            return "{\"ok\":false,\"patch\":\"" + VERSION + "\",\"error\":\""
+                + escape(err[0] == null ? "reset threw" : err[0]) + "\"}";
+        }
+        return "{\"ok\":true,\"patch\":\"" + VERSION + "\",\"players\":" + players[0]
+            + ",\"reset\":" + result[0]
+            + (err[0] != null ? ",\"error\":\"" + escape(err[0]) + "\"" : "") + "}";
     }
 
     @SuppressWarnings("unchecked")
@@ -323,6 +473,8 @@ public final class NumenLockFix {
             json = statusJson();
         } else if ((path.equals("/unlock") || path.equals("/lock/unlock")) && method.equals("POST")) {
             json = unlockJson(params);
+        } else if ((path.equals("/reset-brain") || path.equals("/brain/reset")) && method.equals("POST")) {
+            json = resetBrainJson(params);
         } else {
             json = "{\"ok\":false,\"error\":\"unknown endpoint\"}";
         }
@@ -375,6 +527,8 @@ public final class NumenLockFix {
         }
         return "{\"ok\":true,\"patch\":\"" + VERSION + "\",\"foundClass\":" + found
             + ",\"port\":" + httpPort + ",\"count\":" + count
+            + ",\"brainReady\":" + ensureBrain()
+            + (ensureBrain() ? "" : ",\"brainError\":\"" + escape(lastBrainError) + "\"")
             + ",\"running\":[" + String.join(",", entries) + "]"
             + (found ? "" : ",\"findError\":\"" + escape(lastFindError) + "\"") + "}";
     }

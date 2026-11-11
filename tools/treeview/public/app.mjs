@@ -274,8 +274,13 @@ function layout(model) {
 }
 
 // ── 构建/重建场景 ────────────────────────────────────────────
+// worldGroup 是"树的主体"根 group：整树 + 同伴路径/标记/名字都挂在它下面。
+// 空闲自动旋转只转 worldGroup，不动相机/OrbitControls，也不动 HUD。
+const worldGroup = new THREE.Group();
+scene.add(worldGroup);
+
 const treeGroup = new THREE.Group();
-scene.add(treeGroup);
+worldGroup.add(treeGroup);
 
 function clearGroup(g) {
   while (g.children.length) {
@@ -398,7 +403,7 @@ function companionMeta(name) {
     const n = Math.max(2, state.lastState?.status?.companions?.length ?? 2);
     const hue = (idx * 360) / n;
     state.companions.set(name, { history: [], markers: new Map(), color: hueColor(hue), hue, group: new THREE.Group(), label: null });
-    scene.add(state.companions.get(name).group);
+    worldGroup.add(state.companions.get(name).group);
   }
   return state.companions.get(name);
 }
@@ -483,7 +488,7 @@ function renderCompanions(status) {
   for (const [name, meta] of state.companions) {
     clearGroup(meta.group);
     if (meta.label) {
-      scene.remove(meta.label);
+      worldGroup.remove(meta.label);
       meta.label = null;
     }
   }
@@ -644,7 +649,7 @@ function renderCompanions(status) {
     if (lp) {
       if (!meta.label) {
         meta.label = makeLabel(c.name, `#${meta.color.getHexString()}`, 44, 3.0);
-        scene.add(meta.label);
+        worldGroup.add(meta.label);
       }
       meta.label.position.copy(lp).add(new THREE.Vector3(0, 5.4, 0));
     }
@@ -652,8 +657,8 @@ function renderCompanions(status) {
   // 清理已消失同伴
   for (const [name, meta] of [...state.companions]) {
     if (!comps.some((c) => c.name === name)) {
-      scene.remove(meta.group);
-      if (meta.label) scene.remove(meta.label);
+      worldGroup.remove(meta.group);
+      if (meta.label) worldGroup.remove(meta.label);
       state.companions.delete(name);
     }
   }
@@ -717,6 +722,63 @@ function ensureCard(name) {
   cur.className = 'kv';
   const plan = document.createElement('div');
   plan.className = 'plan';
+  // 优先度调度监控（只读）：时段 / 当前意图 / 候选 / 三线 / 窄学习 / 求助
+  const sched = document.createElement('div');
+  sched.className = 'sched';
+  const schedTop = document.createElement('div');
+  schedTop.className = 'sched-top';
+  const schedTitle = document.createElement('span');
+  schedTitle.className = 'sched-title';
+  schedTitle.textContent = '优先度调度';
+  const schedPhase = document.createElement('span');
+  schedPhase.className = 'sched-phase';
+  schedPhase.textContent = '时段 –';
+  schedTop.append(schedTitle, schedPhase);
+  const schedIntent = document.createElement('div');
+  schedIntent.className = 'sched-intent';
+  schedIntent.textContent = '等待树上报…';
+  const schedCands = document.createElement('div');
+  schedCands.className = 'sched-cands';
+  const driveGrid = document.createElement('div');
+  driveGrid.className = 'drive-grid';
+  const driveEls = {};
+  for (const [key, label] of [
+    ['hunger', '饥饿'],
+    ['fatigue', '疲劳'],
+    ['safety', '安全'],
+    ['resource', '资源'],
+  ]) {
+    const row = document.createElement('div');
+    row.className = 'drive';
+    row.title = `drives.${key}`;
+    const dn = document.createElement('span');
+    dn.className = 'dn';
+    dn.textContent = label;
+    const bar = document.createElement('span');
+    bar.className = 'bar';
+    const fill = document.createElement('i');
+    bar.append(fill);
+    const dv = document.createElement('b');
+    dv.className = 'dv';
+    dv.textContent = '–';
+    row.append(dn, bar, dv);
+    driveGrid.append(row);
+    driveEls[key] = { row, fill, dv };
+  }
+  const schedLines = document.createElement('div');
+  schedLines.className = 'sched-lines';
+  const attLine = document.createElement('div');
+  attLine.className = 'sched-line';
+  const instLine = document.createElement('div');
+  instLine.className = 'sched-line';
+  schedLines.append(attLine, instLine);
+  const schedLearn = document.createElement('div');
+  schedLearn.className = 'sched-learn';
+  schedLearn.textContent = '学习 未上报';
+  const schedHelp = document.createElement('div');
+  schedHelp.className = 'sched-help';
+  schedHelp.hidden = true;
+  sched.append(schedTop, schedIntent, schedCands, driveGrid, schedLines, schedLearn, schedHelp);
   const q = document.createElement('div');
   q.className = 'q';
   const qHead = document.createElement('div');
@@ -733,7 +795,7 @@ function ensureCard(name) {
   const qList = document.createElement('div');
   qList.className = 'q-list';
   q.append(qHead, qList);
-  body.append(hp, cur, plan, q);
+  body.append(hp, cur, plan, sched, q);
   root.append(head, body);
 
   const setCollapsed = (v) => {
@@ -743,9 +805,176 @@ function ensureCard(name) {
   };
   head.addEventListener('click', () => setCollapsed(!root.classList.contains('collapsed')));
 
-  refs = { root, head, swatch, cname, csched, chev, hp, cur, plan, qCount, qRun, qList, qSig: '', setCollapsed };
+  refs = {
+    root,
+    head,
+    swatch,
+    cname,
+    csched,
+    chev,
+    hp,
+    cur,
+    plan,
+    schedPhase,
+    schedIntent,
+    schedCands,
+    driveEls,
+    attLine,
+    instLine,
+    schedLearn,
+    schedHelp,
+    schedSig: null,
+    qCount,
+    qRun,
+    qList,
+    qSig: '',
+    setCollapsed,
+  };
   state.cardEls.set(name, refs);
   return refs;
+}
+
+// ── 优先度调度面板（只读）────────────────────────────────────
+// 数据来自 /api/state 的 companions[]（src/state.mjs snapshot() 追加字段）。
+// 只展示，不参与任何决策；树没上报对应字段时显示"未上报"而不是报错。
+const PHASE_LABEL = {
+  dawn: '黎明',
+  morning: '上午',
+  noon: '中午',
+  afternoon: '下午',
+  dusk: '黄昏',
+  night: '夜晚',
+  midnight: '深夜',
+  day: '白天',
+};
+
+function clampUnit(v) {
+  return Math.max(0, Math.min(1, Number(v) || 0));
+}
+function pctText(v) {
+  return `${Math.round(clampUnit(v) * 100)}%`;
+}
+function signed(n) {
+  const x = Number(n) || 0;
+  return `${x >= 0 ? '+' : ''}${x}`;
+}
+function strategyForIntent(intentState) {
+  const cur = intentState?.current;
+  if (cur?.strategy) return cur.strategy;
+  const cands = Array.isArray(intentState?.candidates) ? intentState.candidates : [];
+  if (cur?.intent) {
+    const hit = cands.find((x) => x?.intent === cur.intent);
+    if (hit?.strategy) return hit.strategy;
+  }
+  return cands[0]?.strategy ?? null;
+}
+
+function renderSched(refs, c) {
+  const phase = c.timePhase ?? null;
+  refs.schedPhase.textContent = `时段 ${phase ? PHASE_LABEL[phase] ?? phase : '–'}`;
+  refs.schedPhase.classList.toggle('night', phase === 'dusk' || phase === 'night' || phase === 'midnight');
+
+  const is = c.intentState ?? null;
+  const cur = is?.current ?? null;
+  const att = c.attention ?? null;
+  const inst = c.instinct ?? null;
+  const learning = c.learning ?? null;
+  const drives = c.drives ?? null;
+  const help = c.helpNeeded ?? null;
+  const hasAny = phase != null || is != null || drives != null || att != null || inst != null || learning != null || help != null;
+
+  // 当前意图 / 计划
+  if (cur) {
+    if (cur.need) {
+      refs.schedIntent.innerHTML = `意图 <b>${esc(cur.intent ?? '?')}</b> · 需求 ${esc(cur.need)} · 优先度 <b>${esc(cur.priority ?? '–')}</b> · 状态 ${esc(cur.status ?? '?')}`;
+    } else {
+      refs.schedIntent.innerHTML = `计划 <b>${esc(cur.recipeId ?? '?')}</b>${cur.source ? ` · ${esc(cur.source)}` : ''} · 状态 ${esc(cur.status ?? '?')}${cur.priority != null ? ` · 优先度 ${esc(cur.priority)}` : ''}`;
+    }
+  } else if (is) {
+    refs.schedIntent.textContent = '当前无意图/计划（空闲）';
+  } else {
+    refs.schedIntent.textContent = hasAny ? '意图未上报' : '调度字段未上报（树重启后生效）';
+  }
+
+  // 候选意图（最多 3 个）
+  const cands = Array.isArray(is?.candidates) ? is.candidates.slice(0, 3) : [];
+  const candSig = cands.map((x) => `${x.need}|${x.intent}|${x.priority}|${x.switchCost}`).join(';');
+  if (candSig !== refs.schedSig) {
+    refs.schedSig = candSig;
+    refs.schedCands.innerHTML = cands.length
+      ? cands
+          .map((x, i) => {
+            const isCur = (cur?.intent && x.intent === cur.intent) || (cur?.need && x.need === cur.need);
+            return `<div class="sched-cand${isCur ? ' cur' : ''}"><span class="ci">${i + 1}</span><span class="cn">${esc(x.need ?? '?')} → ${esc(x.intent ?? '?')}</span><span class="cp">P${esc(x.priority ?? '–')} · 切换 ${esc(x.switchCost ?? '–')}</span></div>`;
+          })
+          .join('')
+      : '<div class="sched-empty">无候选意图</div>';
+  }
+
+  // 三线之一：压力池（0~1 → 小条/百分比）
+  for (const key of ['hunger', 'fatigue', 'safety', 'resource']) {
+    const el = refs.driveEls[key];
+    const raw = drives?.[key];
+    const ok = raw != null && Number.isFinite(Number(raw));
+    const v = ok ? clampUnit(raw) : 0;
+    el.fill.style.width = ok ? pctText(raw) : '0%';
+    el.dv.textContent = ok ? pctText(raw) : '–';
+    el.row.classList.toggle('hot', ok && v >= 0.66);
+    el.row.classList.toggle('warm', ok && v >= 0.33 && v < 0.66);
+  }
+
+  // 三线之二：注意力
+  if (att) {
+    const cap = att.captured;
+    const capText = cap ? `${cap.kind ?? 'captured'}${cap.salience != null ? ` ${cap.salience}` : ''}` : '无';
+    const topSalience = Object.entries(att.salience ?? {})
+      .sort((a, b) => Number(b[1]) - Number(a[1]))
+      .slice(0, 2)
+      .map(([k, v]) => `${k} ${Math.round(Number(v) || 0)}`)
+      .join(' / ');
+    refs.attLine.innerHTML = `注意 焦点 <b>${esc(att.focus ?? '–')}</b> · 捕获 <b${cap ? ' class="warn"' : ''}>${esc(capText)}</b>${topSalience ? ` · 显著 ${esc(topSalience)}` : ''}`;
+  } else {
+    refs.attLine.textContent = '注意 未上报';
+  }
+
+  // 三线之三：本能
+  if (inst) {
+    const active = !!inst.active;
+    refs.instLine.innerHTML = `本能 <b${active ? ' class="warn"' : ''}>${active ? esc(inst.kind ?? 'active') : '无'}</b>${active && inst.priority != null ? ` · 优先度 ${esc(inst.priority)}` : ''}${active && inst.reason ? ` · ${esc(inst.reason)}` : ''}`;
+  } else {
+    refs.instLine.textContent = '本能 未上报';
+  }
+
+  // 窄学习：当前意图对应策略的 attempts / successRate / bonus（有样本才显示）
+  const sid = strategyForIntent(is);
+  const stat = sid ? learning?.strategies?.[sid] : null;
+  if (stat) {
+    refs.schedLearn.innerHTML = `学习 <b>${esc(sid)}</b> · ${esc(stat.attempts ?? 0)} 次 · 成功率 ${Math.round(clampUnit(stat.successRate) * 100)}% · 加成 <b>${esc(signed(stat.bonus))}</b>`;
+  } else if (learning && !sid) {
+    // 当前是计划/无候选意图时没有"当前策略"，给样本最多的策略做参考（明确标注）
+    const top = Object.entries(learning.strategies ?? {}).sort((a, b) => (b[1]?.attempts ?? 0) - (a[1]?.attempts ?? 0))[0];
+    if (top) {
+      const [topId, st] = top;
+      refs.schedLearn.innerHTML = `学习 当前无策略 · 样本最多 <b>${esc(topId)}</b> · ${esc(st.attempts ?? 0)} 次 · 成功率 ${Math.round(clampUnit(st.successRate) * 100)}% · 加成 <b>${esc(signed(st.bonus))}</b>`;
+    } else {
+      refs.schedLearn.textContent = '学习 当前策略无样本';
+    }
+  } else if (learning) {
+    refs.schedLearn.textContent = `学习 ${sid} · 暂无样本`;
+  } else {
+    refs.schedLearn.textContent = '学习 未上报';
+  }
+
+  // 需要玩家动手的短报
+  if (help) {
+    refs.schedHelp.hidden = false;
+    refs.schedHelp.textContent = `需要你：${help.hint || help.message || help.kind || '（未提供说明）'}`;
+    refs.schedHelp.title = [help.kind, help.message, help.at].filter(Boolean).join(' · ');
+  } else {
+    refs.schedHelp.hidden = true;
+    refs.schedHelp.textContent = '';
+    refs.schedHelp.title = '';
+  }
 }
 
 function renderCards(status) {
@@ -809,6 +1038,7 @@ function renderCards(status) {
     refs.plan.textContent = plan
       ? `${plan.recipeId} · ${plan.status}${plan.steps_total ? ` ${plan.steps_done ?? 0}/${plan.steps_total}` : ''}${plan.cursor ? ` · 当前步 ${plan.cursor}` : ''}`
       : '无计划';
+    renderSched(refs, c);
 
     // 队列：限高滚动，超量折叠；内容没变就不碰 DOM（保住滚动位置）
     const goals = Array.isArray(c.goals) ? c.goals : [];
@@ -947,10 +1177,53 @@ $('pathN').oninput = () => {
   renderCompanions(state.lastState ?? {});
 };
 
+// ── 空闲自动旋转（只转树主体 worldGroup，不碰相机/OrbitControls）────
+// 9s 无鼠标/触摸/滚轮/键盘操作后，整棵 3D 树绕 Y 轴缓慢自转（0.08 rad/s ≈ 78s/圈）。
+// 任意操作立即停回用户控制；按住指针期间不启动，避免和拖拽/缩放打架。
+const AUTO_ROTATE_IDLE_MS = 9000;
+const AUTO_ROTATE_SPEED = 0.08; // rad/s
+let lastUserInputAt = performance.now();
+let autoRotating = false;
+let pointerHeld = false;
+let lastFrameAt = 0;
+
+function noteUserInput() {
+  lastUserInputAt = performance.now();
+  autoRotating = false;
+}
+for (const type of ['pointermove', 'pointerdown', 'mousedown', 'wheel', 'touchstart', 'touchmove', 'keydown']) {
+  addEventListener(type, noteUserInput, { passive: true });
+}
+addEventListener('pointerdown', () => {
+  pointerHeld = true;
+}, { passive: true });
+addEventListener('pointerup', () => {
+  pointerHeld = false;
+  noteUserInput();
+}, { passive: true });
+addEventListener('pointercancel', () => {
+  pointerHeld = false;
+  noteUserInput();
+}, { passive: true });
+addEventListener('blur', () => {
+  pointerHeld = false;
+  noteUserInput();
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) noteUserInput();
+});
+
 // ── 渲染循环 ─────────────────────────────────────────────────
 let lastCam = 0;
 function tick(t) {
   requestAnimationFrame(tick);
+  const now = performance.now();
+  const dt = lastFrameAt ? Math.min(0.1, (now - lastFrameAt) / 1000) : 0;
+  lastFrameAt = now;
+  if (!pointerHeld && !autoRotating && now - lastUserInputAt >= AUTO_ROTATE_IDLE_MS) autoRotating = true;
+  if (autoRotating && !pointerHeld) {
+    worldGroup.rotation.y = (worldGroup.rotation.y + AUTO_ROTATE_SPEED * dt) % (Math.PI * 2);
+  }
   controls.update();
   // 当前节点呼吸
   const time = t / 1000;

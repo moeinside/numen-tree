@@ -18,6 +18,8 @@ function usage() {
   node src/cli.mjs lock                          # 查补丁状态 + 每个同伴的 slotBlocked
   node src/cli.mjs lock --companion <名>         # 手动清这个同伴的锁
   node src/cli.mjs lock --all                    # 清全部
+  node src/cli.mjs lock --companion <名> --reset-brain  # 清内置脑任务槽（补丁 v1.2，不丢背包）
+  node src/cli.mjs lock --all --reset-brain      # 清所有同伴的内置脑任务槽
 
 任务（意图 → 配方计划，树自动分步执行）：
   node src/cli.mjs task --companion tyrander --intent "把木头存了" [--deadline 120]
@@ -616,6 +618,19 @@ async function main() {
   }
 
   if (cmd === 'lock') {
+    if (args['reset-brain']) {
+      if (!args.all && !args.companion) {
+        console.error('用法：lock --companion <名> --reset-brain  或  lock --all --reset-brain');
+        process.exit(1);
+      }
+      const r = await call('POST', '/lock', {
+        op: 'reset-brain',
+        companion: args.all ? undefined : args.companion,
+        all: !!args.all,
+      });
+      console.log(JSON.stringify(r, null, 2));
+      return;
+    }
     const showStatus = !args.companion || args.status;
     if (showStatus && !args.all) {
       const r = await call('GET', '/lock');

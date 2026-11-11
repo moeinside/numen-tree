@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import http from 'node:http';
 import { loadConfig, loadNumenEndpoint } from './config.mjs';
 import { NumenClient } from './numen.mjs';
@@ -11,15 +13,61 @@ import { PlaceBook } from './places.mjs';
 import { Planner, planView, planAlive } from './plan.mjs';
 import { RECIPES } from './recipes.mjs';
 import { getTactic } from './tactics.mjs';
+import { getStrategy } from './strategy.mjs';
+import { declarationForStrategy, priorityClassForConsequence, consequenceForPriorityClass } from './priority-declarations.mjs';
 import { INTERRUPTS } from './interrupts.mjs';
 import { WorldMemory } from './worldmem.mjs';
 import { lockFixFromConfig } from './lockfix.mjs';
+import { tentacleFromConfig } from './tentacle.mjs';
+
+// ── 启动 guard：dev 持有 lease 时，直接 node src/daemon.mjs 也必须拒绝 ──
+// 权威仍是 runs/.pilot-lock.json（lease + 未过期 + PID 活）；mode.json 只是快照。
+// 紧急人工绕过：TREE_ALLOW_DEV=1（会写日志，仅限确认 dev 已停但 lease 残留时）。
+function activeDevLease() {
+  if (process.env.TREE_ALLOW_DEV === '1') return null;
+  const lockFile = process.env.TREE_GUARD_LOCK
+    ? path.resolve(process.env.TREE_GUARD_LOCK)
+    : path.resolve('runs', '.pilot-lock.json');
+  let lease;
+  try {
+    // 容忍 Windows/PowerShell 常见的 UTF-8 BOM；否则 BOM 会让 guard 解析失败而误放行。
+    const raw = fs.readFileSync(lockFile, 'utf8').replace(/^\uFEFF/, '');
+    lease = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!lease || !lease.owner) return null;
+  const kind = String(lease.kind || lease.mode || '');
+  if (!/dev|pilot|mode/i.test(kind) && !/^(pilot|mode|dev)/i.test(String(lease.owner))) {
+    return null;
+  }
+  const exp = Date.parse(lease.expiresAt || '');
+  if (Number.isFinite(exp) && exp < Date.now()) return null;
+  try {
+    process.kill(Number(lease.pid), 0);
+  } catch (e) {
+    if (e?.code !== 'EPERM') return null;
+  }
+  return { ...lease, lockFile };
+}
+
+const devLease = activeDevLease();
+if (devLease) {
+  console.error(
+    `[tree-guard] dev lease active: owner=${devLease.owner} pid=${devLease.pid} runId=${devLease.runId ?? ''}`,
+  );
+  console.error('[tree-guard] refuse to start tree while dev tool holds numen MCP.');
+  console.error('[tree-guard] stop dev first: node tools/mode.mjs off --force');
+  process.exit(3);
+}
 
 const cfg = loadConfig();
 loadNumenEndpoint(cfg); // 尽早校验配置存在
 
 // 僵尸锁外部清理客户端（补丁 v3 的 127.0.0.1:8768；补丁没装/游戏没重启时调用会优雅失败）
 const lockfix = lockFixFromConfig(cfg);
+// 只读触手（numen_tree_tentacle 127.0.0.1:8769；mod 不在时 getPerception 会优雅失败）
+const tentacle = tentacleFromConfig(cfg);
 
 const ep = loadNumenEndpoint(cfg);
 const trace = new Trace(cfg.trace.dir, cfg.trace.keepDays);
@@ -205,20 +253,24 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && url.pathname === '/lock') {
       const body = await readBody(req);
-      if (body.op !== 'unlock') {
-        return json(res, 400, { error: `未知操作：${body.op ?? '(空)'}（可用 unlock）` });
+      if (body.op !== 'unlock' && body.op !== 'reset-brain') {
+        return json(res, 400, { error: `未知操作：${body.op ?? '(空)'}（可用 unlock / reset-brain）` });
       }
       const lane = body.companion ? lanes.get(body.companion) : null;
       if (body.companion && !lane) {
         return json(res, 404, { error: `没有这个同伴：${body.companion}` });
       }
       let r;
-      if (lane && !body.all) r = await lane.unlockNow({ all: false });
+      if (body.op === 'reset-brain') {
+        if (!lockfix?.resetBrain) r = { ok: false, error: '补丁 v1.2 未加载（需重启游戏）' };
+        else if (lane && !body.all) r = await lockfix.resetBrain({ uuid: lane.state.id });
+        else r = await lockfix.resetBrain({ all: true });
+      } else if (lane && !body.all) r = await lane.unlockNow({ all: false });
       else if (lockfix) r = await lockfix.unlock({ all: true });
       else r = { ok: false, error: 'lockRecovery 未启用' };
-      trace.info('lock_unlock_request', {
+      trace.info('lock_request', {
         companion: lane?.state?.name ?? '(all)',
-        note: JSON.stringify(r).slice(0, 200),
+        note: `${body.op} ${JSON.stringify(r).slice(0, 200)}`,
       });
       return json(res, r?.ok ? 200 : 502, r);
     }
@@ -390,13 +442,34 @@ const server = http.createServer(async (req, res) => {
         if (!getTactic(body.params?.tactic)) {
           return json(res, 400, { error: `没有这个战术包：${body.params?.tactic}` });
         }
+      } else if (body.skill === 'strategy') {
+        if (!getStrategy(body.params?.strategy)) {
+          return json(res, 400, { error: `没有这个战略包：${body.params?.strategy}` });
+        }
       } else if (!getSkill(body.skill)) {
         return json(res, 400, { error: `没有这个技能：${body.skill}` });
+      }
+      const priority = Number(body.priority ?? 0);
+      let priorityClass = null;
+      let consequence = null;
+      let reversal = null;
+      if (body.skill === 'tactic') {
+        const tactic = getTactic(body.params?.tactic);
+        priorityClass = tactic?.priorityClass ?? null;
+        consequence = consequenceForPriorityClass(priorityClass);
+      } else if (body.skill === 'strategy') {
+        const decl = declarationForStrategy(body.params?.strategy);
+        priorityClass = decl.priorityClass;
+        consequence = decl.consequence;
+        reversal = decl.reversal;
       }
       const goal = makeGoal({
         skill: body.skill,
         params: body.params || {},
-        priority: Number(body.priority ?? 0),
+        priority,
+        priorityClass,
+        consequence,
+        reversal,
         note: body.note || '',
       });
       lane.state.pushGoal(goal);
@@ -553,6 +626,7 @@ async function main() {
     numen,
     places,
     startTask,
+    tentacle,
     skills: () => listSkills(),
   });
   await mcpSrv.listen().catch((e) => {

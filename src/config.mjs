@@ -49,6 +49,12 @@ const DEFAULTS = {
     file: 'places.json',
     maxEntries: 500,
   },
+  // P0-b：GoalProfile + milestone 持久化（不存 plan cursor）
+  goalStore: {
+    enabled: true,
+    file: 'goalstore.json',
+    worldId: 'default',
+  },
   // 世界记忆：容器内容 / 资源点（M1 最小集）
   worldmem: {
     file: 'world.json',
@@ -85,13 +91,21 @@ const DEFAULTS = {
     // 日程（M1.5）：白天干活 / 夜里守家的时段表在 src/schedule.mjs（数据）；
     // 这里只留总开关。关掉 = 回到 M1 老行为（只靠中断/模式/牵引绳）。
     schedule: { enabled: true },
+    // 效用仲裁（docs/24）：普通战略按分数竞争；当前试点 store_materials
+    utility: {
+      enabled: true,
+      minIntervalSeconds: 180,
+    },
     // 本能让路：numen 核心反射（逃/防御/脱困/MLG/溺水）触发后，树暂停派动作这么久；
     // 反射归 mod，不要抢槽。由 reflex 事件或"补丁 count=0 但槽被拒"触发。
     instinctHoldSeconds: 8,
+    // 连续本能风暴超过这么久 → 树升级上报（instinct_stuck），让 LLM/主人介入
+    instinctStuckSeconds: 30,
     // 执行策略层（docs/20 §10）：safe-batch / field-guarded。
     // "安全"看行为证据（reflex/被打断/受伤/敌对/主人危险），不看是否在基地。
     execPolicy: {
       enabled: true,
+      gateLongSkills: true,
       batchMaxSeconds: 60,
       quietSeconds: 30,
       downgradeCooldownSeconds: 60,
@@ -114,6 +128,23 @@ const DEFAULTS = {
       minIntervalSeconds: 30,
       timeoutMs: 2500,
     },
+    // 内置脑长时间占槽（补丁 count=0）时的保守自救：只尝试一次，长冷却
+    brainRecovery: {
+      enabled: true,
+      blockedSeconds: 120,
+      cooldownSeconds: 300,
+      maxPerHour: 3,
+      skipOwnerDangerSeconds: 60,
+    },
+    // 只读触手 mod（numen_tree_tentacle，127.0.0.1:8769）；不在时树自动回退
+    tentacle: {
+      enabled: true,
+      host: '127.0.0.1',
+      port: 8769,
+      timeoutMs: 2500,
+      primaryObserveMs: 3000,
+      radius: 16,
+    },
     // 求生：血/饿阈值、觅食参数、求助节奏
     survival: {
       retreatHp: 8,
@@ -132,7 +163,9 @@ const DEFAULTS = {
       seekSeconds: 40, // 出去找食物走多久
       starvingEscalateSeconds: 180, // 饿且没吃的持续多久就上报"要饿死了"
       starvingRepeatSeconds: 180, // 两次求助的最小间隔
-      starvingHaltSeconds: 240, // 上报后停手多久等大脑
+      starvingHaltSeconds: 0, // 饿死也不停手：0=不停（用户要求：饿死比卡着强）
+      foodRetrySeconds: 60, // 找食物失败后，多久再试；期间允许其它行动计划
+      stuckHaltSeconds: 120, // 卡住/掉坑等"停手类"中断的停手时长（和饥饿分开）
     },
     // 战斗评估表：血 > 60% 且有武器 → 打；≤ 40% / 没武器 / 被围 → 撤
     combat: {
@@ -191,6 +224,7 @@ export function loadConfig(file = path.join(ROOT, 'tree.config.json')) {
   cfg.lines.dir = path.resolve(ROOT, cfg.lines.dir);
   cfg.places.file = path.resolve(ROOT, cfg.places.file);
   cfg.worldmem.file = path.resolve(ROOT, cfg.worldmem.file);
+  if (cfg.goalStore?.file) cfg.goalStore.file = path.resolve(ROOT, cfg.goalStore.file);
   return cfg;
 }
 

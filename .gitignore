@@ -3,6 +3,16 @@ logs/
 places.json
 *.log
 
+# ── 开发工具运行时产物（mode/lease/run/archive）──
+# 只忽略这些目录下的运行产物；工具源码在 tools/、协议文档在 docs/，不受影响。
+run/
+runs/
+archive/
+goalstore.json
+backup/
+*.lnk
+tentacle/build/
+
 # ── 依赖 / 构建产物 ──
 node_modules/
 npm-debug.log*

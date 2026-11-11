@@ -4,11 +4,179 @@ import { KIND_WORDS } from './lines.mjs';
 import { pickInterrupt } from './interrupts.mjs';
 import { buildAtom } from './atoms.mjs';
 import { runTactic, runSettle, needsSettle } from './tactic-runner.mjs';
+import { getStrategy, runStrategy, storeMaterialsCandidate } from './strategy.mjs';
+import { createArbiterState, chooseCandidate } from './arbiter.mjs';
+import { intentForNeed, intentById, activeIntents } from './intents.mjs';
+import { statePhase } from './time.mjs';
+import { factsOf } from './facts.mjs';
+import { updateDrives, driveBonusForNeed, describeDrives } from './drives.mjs';
+import { attentionState, attentionBonusForNeed } from './attention.mjs';
+import { instinctState } from './instinct.mjs';
+import { createLearningState, recordStrategyOutcome, learningBonus } from './learning.mjs';
+import { evaluateReadiness, shouldAuditDawn, preflight as readinessPreflight } from './readiness.mjs';
+import { createFailureState, recordFailure, failureBudgetExceeded } from './failure.mjs';
+import { createTerminationState, recordTerminationAttempt, clearTerminationAttempt } from './failure-termination.mjs';
+import { createDispatchWatchdog, observePlan, noteAtomBegin, checkDispatchWatchdog } from './dispatch-watchdog.mjs';
+import { markToolFailure, clearToolFailure } from './tool-health.mjs';
+import { markFact, resolveFact } from './perception-evidence.mjs';
+import { distance3, atHome } from './space.mjs';
+import { baseRegions, isInsideBase } from './base-guard.mjs';
+import { fatigueFactor, effectiveAutoTimeout } from './behavior.mjs';
+import { createGoalStore, loadGoalStore, saveGoalStore } from './goalstore.mjs';
+import { resumeDecision } from './goalresume.mjs';
+import { createFactStore, observeFact } from './perception.mjs';
+import { beginTx, settleTx, postcheckTx, repostcheckTx, interruptTx } from './action-tx.mjs';
+import { decidePreemption, recordInterruption } from './priority-preempt.mjs';
+import { beginCommitment, settleCommitment } from './priority-preempt.mjs';
+import { consequenceForPriorityClass, declarationForStrategy, declarationForInterrupt, priorityClassForConsequence } from './priority-declarations.mjs';
+import { CONSEQUENCE } from './priority.mjs';
+import { savePriorityStore, prioritySnapshot } from './priority-store.mjs';
+import { loadPriorityStore } from './priority-store.mjs';
+import { tentacleFromConfig } from './tentacle.mjs';
+import { evaluateNeeds, worldDayIndex, hasUsableTool } from './needs.mjs';
+import { groundtruthEnabled, snapshotAtom } from './groundtruth-client.mjs';
+
+function persistPriority(state) {
+  if (!state?.priorityStorePath) return;
+  try {
+    savePriorityStore(state.priorityStorePath, prioritySnapshot({
+      worldId: state.dimension ?? state.worldId ?? 'unknown',
+      companionId: state.id ?? state.name ?? 'unknown',
+      worldEpoch: state.worldEpoch ?? 0,
+      priority: state.priority,
+      stats: state.priorityStats,
+    }));
+  } catch {
+    /* persistence must not change behavior */
+  }
+}
+
+function openPriorityTx(state, goal, goalPriority, priorityClass) {
+  const consequence = goal.consequence ?? consequenceForPriorityClass(priorityClass) ?? CONSEQUENCE.UNDECLARED;
+  const reversal = goal.reversal ?? 'resumable';
+  const tx = beginTx({ action: `goal:${goal.id}`, consequence, reversal });
+  state.priorityTx = tx;
+  beginCommitment(state, { id: `goal:${goal.id}`, consequence, reversal, priority: goalPriority });
+  persistPriority(state);
+  return tx;
+}
+
+function closePriorityTx(state, ok) {
+  const tx = state.priorityTx;
+  state.priorityTx = null;
+  if (tx && tx.status === 'begun') {
+    settleTx(tx, { ok: ok === true });
+    postcheckTx(tx, { passed: ok === true, evidence: { goal: tx.action } });
+  }
+  settleCommitment(state, { ok: ok === true, status: tx?.status === 'unknown' ? 'interrupted' : 'failed' });
+  persistPriority(state);
+  return tx;
+}
+
+function openAtomTx(state, goal, atomId, consequence, reversal) {
+  const tx = beginTx({
+    action: `atom:${atomId}`,
+    consequence,
+    reversal,
+    goalId: goal.id,
+    atomId,
+    parentTxId: state.priorityTx?.id ?? null,
+  });
+  state.priorityAtomTx = tx;
+  observeAtomSnapshot(state, atomId, 'before');
+  return tx;
+}
+
+/** Observational only: never awaited, never read by decisions. */
+function observeAtomSnapshot(state, atomId, phase) {
+  if (!groundtruthEnabled()) return;
+  const promise = snapshotAtom({
+    pos: state.pos,
+    atomId,
+    phase,
+    runId: `tree-${state.name || state.id || 'companion'}`,
+  });
+  if (promise) {
+    promise.then((r) => {
+      if (r?.ok) {
+        try {
+          state.lastAtomSnapshot = {
+            atomId, phase, seq: r.snapshot?.seq ?? null,
+            hash: r.snapshot?.hash ?? null, at: Date.now(),
+          };
+        } catch { /* observational */ }
+      }
+    });
+  }
+}
+
+/** Phase C/M3：只读记录“动作前手持工具 + 动作结果”，供正/负样本对账。 */
+function traceToolAttempt(lane, state, atomId, outcome, heldBefore) {
+  if (!/dig|mine|harvest/i.test(String(atomId))) return;
+  try {
+    lane.trace.info('tool_held_attempt', {
+      companion: state.name,
+      note: JSON.stringify({
+        atomId,
+        heldBefore: heldBefore ?? null,
+        heldAfter: state.held ?? null,
+        ok: outcome?.ok === true,
+        kind: outcome?.kind ?? null,
+        msg: String(outcome?.msg ?? '').slice(0, 200),
+        data: outcome?.data ?? null,
+        at: Date.now(),
+      }),
+    });
+  } catch {
+    /* observational only */
+  }
+}
+
+function finishAtomTx(state, tx, outcome) {
+  if (!tx) return;
+  observeAtomSnapshot(state, tx.atomId ?? String(tx.action ?? 'atom'), 'after');
+  if (state.priorityAtomTx === tx) state.priorityAtomTx = null;
+  if (outcome?.ok === true) {
+    state.waitUntil = 0;
+    settleTx(tx, { ok: true });
+    postcheckTx(tx, { passed: true, evidence: outcome.data ?? { kind: outcome.kind ?? 'ok' } });
+  } else {
+    const msg = String(outcome?.msg ?? '');
+    if (/tool.?broken/i.test(msg)) {
+      markToolFailure(state, { tool: 'pickaxe', kind: 'tool_broken', broken: true });
+    } else if (/can't harvest|can't_harvest/i.test(msg)) {
+      // 只先标 suspect；连续 2 次或显式 tool_broken 才升级
+      markToolFailure(state, { tool: 'pickaxe', kind: 'cant_harvest_suspect', broken: false });
+    }
+    settleTx(tx, { ok: false });
+    postcheckTx(tx, { passed: false, evidence: outcome?.data ?? { kind: outcome?.kind ?? 'failed' } });
+  }
+}
+
+/** Phase C：抢占后的外部世界观测；禁止用执行器返回值冒充。 */
+async function worldPostcheck(lane, state) {
+  try {
+    if (!lane.tentacle?.perception) return { ok: false, reason: 'tentacle_unavailable', at: Date.now() };
+    const p = await lane.tentacle.perception({ uuid: state.id, radius: 8 });
+    if (!p?.ok) return { ok: false, reason: p?.reason ?? 'tentacle_not_ok', at: Date.now() };
+    return {
+      ok: true,
+      source: 'tentacle',
+      at: Date.now(),
+      terrain: p.terrain ?? null,
+      self: p.self ?? null,
+    };
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e), at: Date.now() };
+  }
+}
+
 import {
   EXEC_DEFAULTS,
   createExecState,
   describeExec,
   evaluateMode,
+  isLongSkill,
   noteInterrupt,
   noteObservation,
   noteRisk,
@@ -53,7 +221,10 @@ local parts = {
   ',"y":' .. N(me.pos.y),
   ',"z":' .. N(me.pos.z),
   ',"dim":' .. S(me.dimension),
+  ',"in_water":' .. (me.in_water and 'true' or 'false'),
+  ',"on_ground":' .. (me.on_ground and 'true' or 'false'),
   ',"game_time":' .. N(w.game_time),
+  ',"day_time":' .. O(w.day_time),
   ',"task_id":' .. O(t.task_id),
   ',"task":' .. O(t.task),
   ',"task_state":' .. O(t.state),
@@ -163,7 +334,10 @@ local parts = {
   ',"y":' .. N(me.pos.y),
   ',"z":' .. N(me.pos.z),
   ',"dim":' .. S(me.dimension),
+  ',"in_water":' .. (me.in_water and 'true' or 'false'),
+  ',"on_ground":' .. (me.on_ground and 'true' or 'false'),
   ',"game_time":' .. N(w.game_time),
+  ',"day_time":' .. O(w.day_time),
   ',"task_id":' .. O(t.task_id),
   ',"task":' .. O(t.task),
   ',"task_state":' .. O(t.state),
@@ -225,8 +399,13 @@ export class Lane {
     this.planner = planner || null; // 计划层（matching 配方）
     this.worldmem = worldmem || null; // 世界记忆（容器/资源点，记录用）
     this.lockfix = lockfix || null; // 僵尸锁外部清理（补丁 v3 的 127.0.0.1:8768）
+    this.tentacle = tentacleFromConfig(cfg); // 只读触手 mod（8769）；Lua 槽被占时降级观测
+    this.dispatchWatchdog = createDispatchWatchdog();
+    this.factStore = createFactStore(); // P0-0a 白名单三态事实
     // 执行策略层（docs/20 §10）：safe-batch / field-guarded；"安全"看行为证据，不看位置
     this.exec = createExecState();
+    // 效用仲裁（docs/24）：普通战略按分数竞争；当前只接 store_materials 作为试点
+    this.arbiter = createArbiterState();
     const ep = cfg.behavior?.execPolicy || {};
     this.execPolicy = {
       ...EXEC_DEFAULTS,
@@ -235,6 +414,83 @@ export class Lane {
     };
     // 初始模式来自配置；之后可由 tree_control / CLI 按同伴覆盖
     this.state.mode = cfg.behavior?.mode ?? this.state.mode ?? 'survival';
+    // P0-b：只读加载 GoalProfile；第一版只记录 active profile/milestone，不做自动续跑
+    this.goalStoreFile = cfg.goalStore?.enabled ? cfg.goalStore.file : null;
+    this.goalSession = null;
+
+    // Phase C：priority store 只恢复统计/待核对快照，不直接恢复 current。
+    // current 恢复必须先过世界 postcheck，见 docs/100。
+    this.priorityStoreFile = cfg.priorityStore?.file ?? null;
+    this.state.priorityStorePath = this.priorityStoreFile;
+    if (this.priorityStoreFile) {
+      try {
+        const loaded = loadPriorityStore(this.priorityStoreFile, {
+          worldId: cfg.priorityStore?.worldId ?? this.state.dimension ?? undefined,
+          companionId: this.state.id ?? this.state.name,
+          worldEpoch: cfg.priorityStore?.worldEpoch,
+        });
+        if (loaded.ok) {
+          this.state.priorityStats = {
+            preempted: 0, legacy: 0, completed: 0, interrupted: 0, ineligible: 0, decisions: 0, reasoned: 0, sameAtomFailures: 0,
+            ...(loaded.store.stats ?? {}),
+          };
+          this.state.priorityRestored = {
+            current: loaded.store.priority?.current ?? null,
+            status: 'awaiting_world_postcheck',
+          };
+          this.trace.info('priority_store_loaded', {
+            companion: this.state.name,
+            note: `loaded stats=${JSON.stringify(this.state.priorityStats)}；current 不自动恢复`,
+          });
+        } else {
+          this.trace.warn('priority_store_rejected', {
+            companion: this.state.name,
+            note: `${loaded.reason}; current 不恢复`,
+          });
+        }
+      } catch (e) {
+        this.trace.warn('priority_store_load_failed', {
+          companion: this.state.name,
+          note: String(e?.message ?? e),
+        });
+      }
+    }
+    if (this.goalStoreFile) {
+      try {
+        const loaded = loadGoalStore(this.goalStoreFile);
+        this.goalSession = {
+          store:
+            loaded.ok && loaded.store
+              ? loaded.store
+              : createGoalStore({
+                  worldId: cfg.goalStore?.worldId || this.state.dimension || 'default',
+                  companionId: this.state.name,
+                  worldEpoch: 0,
+                }),
+          loaded: loaded.ok,
+          warnings: loaded.warnings || [],
+        };
+        this.trace.info('goal_store_loaded', {
+          companion: this.state.name,
+          note: loaded.ok
+            ? `已加载 ${this.goalStoreFile}（epoch=${this.goalSession.store.worldEpoch}）`
+            : `无可用存档（${loaded.reason}），新建`,
+        });
+        // 重启后从 active milestone 恢复：只有 active 状态才续跑
+        const activeMilestone = (this.goalSession.store?.milestones || []).find(
+          (m) => m.status === 'active',
+        );
+        this.pendingGoalResume =
+          loaded.ok && activeMilestone
+            ? { id: activeMilestone.id, title: activeMilestone.title || activeMilestone.id }
+            : null;
+      } catch (e) {
+        this.trace.warn('goal_store_load_failed', {
+          companion: this.state.name,
+          note: String(e?.message ?? e),
+        });
+      }
+    }
   }
 
   start() {
@@ -259,9 +515,220 @@ export class Lane {
     }
   }
 
+  /** 唯一动作派发门：每 tick 心跳 + 锁归属 + active/steps=0 僵尸态。 */
+  #dispatchGate({ path = 'tick', goal = null } = {}) {
+    const st = this.state;
+    const ownerGoalId = st.current?.goalId ?? null;
+    const lockOwner = st.actionLock ? (ownerGoalId ?? 'unknown') : null;
+    const lockMine = !!(goal && ownerGoalId && goal.id === ownerGoalId);
+    const pendingInterrupt = (st.goals || []).some(
+      (g) => (g.status === GoalStatus.PENDING || g.status === GoalStatus.RUNNING) &&
+        typeof g.note === 'string' && g.note.startsWith('interrupt:'),
+    );
+    const plan = st.plan;
+    let decision = 'allow';
+    let reason = null;
+    if (st.actionLock && !lockMine) {
+      decision = 'deferred';
+      if (plan?.gateMode === 'stalled') {
+        reason = plan.gateReason;
+      } else {
+        reason = `lock_held_by:${lockOwner}`;
+        if (plan && planAlive(plan)) {
+          plan.gateReason = reason;
+          plan.gateMode = 'action_lock';
+        }
+      }
+    }
+    const now = Date.now();
+    const lockAgeMs = st.actionLock && st.actionLockSince ? now - Number(st.actionLockSince) : null;
+    if (lockAgeMs != null && lockAgeMs > 180_000 &&
+      now - Number(st.auditLockStaleAt || 0) > 30_000) {
+      st.auditLockStaleAt = now;
+      this.trace.warn('audit_action_lock_stale', {
+        companion: st.name,
+        note: `actionLock 已持有 ${Math.round(lockAgeMs / 1000)}s owner=${lockOwner ?? 'unknown'}（仅观测）`,
+      });
+    }
+    if (path !== 'tick' || now - Number(st.lastGateTickAt || 0) >= 1000) {
+      st.lastGateTickAt = now;
+      try {
+        this.trace.info('gate_tick', {
+          companion: st.name,
+          note: JSON.stringify({
+            path,
+            goalId: goal?.id ?? null,
+            planId: plan?.id ?? null,
+            planStatus: plan?.status ?? null,
+            stepsDone: plan?.stepResults?.length ?? null,
+            lockOwner,
+            lockAgeMs,
+            pendingInterrupt,
+            gateReason: plan?.gateReason ?? null,
+            gateMode: plan?.gateMode ?? null,
+            decision,
+            at: now,
+          }),
+        });
+      } catch {
+        /* observational only */
+      }
+    }
+
+    // active + steps=0 持续 2s = 僵尸态，不再当合法挂起。
+    if (path === 'tick') {
+      if (plan && plan.status === PlanStatus.ACTIVE && (plan.stepResults?.length ?? 0) === 0) {
+        if (!plan.gateReason) {
+          if (st.auditPlanNoReasonPlanId !== plan.id || !st.auditPlanNoReasonSince) {
+            st.auditPlanNoReasonPlanId = plan.id;
+            st.auditPlanNoReasonSince = now;
+          }
+          if (now - Number(st.auditPlanNoReasonSince) > 10_000 &&
+            now - Number(st.auditPlanNoReasonAt || 0) > 10_000) {
+            st.auditPlanNoReasonAt = now;
+            this.trace.warn('audit_plan_no_reason', {
+              companion: st.name,
+              note: `${plan.id} active/steps=0 且无 gateReason 超过 10s（仅观测）`,
+            });
+          }
+        } else {
+          st.auditPlanNoReasonSince = null;
+          st.auditPlanNoReasonPlanId = null;
+        }
+        if (st.gateZombiePlanId !== plan.id || !st.gateZombieSince) {
+          st.gateZombiePlanId = plan.id;
+          st.gateZombieSince = now;
+        } else if (now - Number(st.gateZombieSince) >= 2000) {
+          plan.gateReason = 'active_steps0';
+          plan.gateMode = 'stalled';
+          suspendPlan(plan, 'stalled');
+          this.trace.warn('plan_stalled_active_zero_steps', {
+            companion: st.name,
+            note: `${plan.id} active 且 steps=0 超过 2s`,
+          });
+        }
+      } else {
+        st.gateZombiePlanId = null;
+        st.gateZombieSince = 0;
+      }
+    }
+    return { allow: decision === 'allow', decision, reason, lockOwner, pendingInterrupt };
+  }
+
+  /** 紧急就地避难硬门：不参与普通候选评分。 */
+  #maybeEmergencyShelter() {
+    const st = this.state;
+    if (st.actionLock || st.goals?.some((g) => g.skill === 'panic_shelter' &&
+      (g.status === GoalStatus.PENDING || g.status === GoalStatus.RUNNING))) return;
+    if (st.goals?.some((g) => (g.status === GoalStatus.PENDING || g.status === GoalStatus.RUNNING) &&
+      typeof g.note === 'string' && g.note.startsWith('interrupt:'))) return;
+    const hp = Number(st.hp ?? 20);
+    const maxHp = Number(st.maxHp ?? 20) || 20;
+    const hpPct = (hp / maxHp) * 100;
+    const dist = st.hostileDistance == null ? null : Number(st.hostileDistance);
+    if (hpPct > 35 || dist == null || dist > 6) return;
+    const now = Date.now();
+    if (now - Number(st.shelterAttemptAt || 0) < 30_000) return;
+    st.shelterAttemptAt = now;
+    const goal = makeGoal({
+      skill: 'panic_shelter',
+      params: {},
+      priority: 99,
+      priorityClass: 'P0',
+      note: 'interrupt:emergency_shelter',
+    });
+    st.pushGoal(goal);
+    this.trace.warn('emergency_shelter', {
+      companion: st.name,
+      note: `hp=${hpPct.toFixed(0)}% hostileDist=${dist}，就地避难硬门`,
+    });
+  }
+
+  /** M0 观测：时间段切换只记录，不影响行为。 */
+  #auditClock() {
+    const st = this.state;
+    const phase = st.timePhase ?? (st.dark ? 'night' : 'day');
+    const prev = st.auditPhase;
+    if (prev != null && prev !== phase) {
+      this.trace.info('phase_change', {
+        companion: st.name,
+        note: `${prev} -> ${phase}（game_time=${st.gameTime ?? '?'}）`,
+      });
+    }
+    st.auditPhase = phase;
+    const segId = this.seg?.id ?? null;
+    if (st.auditSegId != null && segId !== st.auditSegId) {
+      this.trace.info('segment_change', {
+        companion: st.name,
+        note: `${st.auditSegId} -> ${segId}`,
+      });
+    }
+    st.auditSegId = segId;
+
+    // 离开 16 格安全半径后返回的循环：只记录，不判定行为。
+    const home = this.#homePos();
+    if (home && st.pos) {
+      const d = Math.hypot(Number(home.x) - Number(st.pos.x), Number(home.z) - Number(st.pos.z));
+      if (Number.isFinite(d)) {
+        const wasOut = !!st.auditHomeOut;
+        if (!wasOut && d > 16) st.auditHomeOut = true;
+        else if (wasOut && d <= 16) {
+          st.auditHomeOut = false;
+          st.auditHomeCycles = Number(st.auditHomeCycles || 0) + 1;
+          this.trace.info('audit_home_cycle', {
+            companion: st.name,
+            note: `离开16格后返回，累计 ${st.auditHomeCycles} 次`,
+          });
+        }
+      }
+    }
+  }
+
+  /** M0 观测：夜间/黄昏尝试户外长动作，只记录；巡逻/家附近移动不算。 */
+  #auditAction(goal) {
+    const st = this.state;
+    const phase = st.timePhase ?? (st.dark ? 'night' : 'day');
+    if (!['dusk', 'night', 'midnight'].includes(phase)) return;
+    const note = String(goal?.note ?? '');
+    if (note.includes('patrol')) return;
+    const t = goal?.params?.target;
+    const home = this.#homePos();
+    if (t && home) {
+      const d = Math.hypot(Number(t.x) - Number(home.x), Number(t.z) - Number(home.z));
+      if (Number.isFinite(d) && d <= 16) return; // 家附近巡逻/收尾，不是户外长任务
+    }
+    const longOutdoor = new Set([
+      'forage', 'seek_food', 'explore', 'mine_nearby', 'dig_nearby',
+      'go_to', 'smelt', 'fetch_batch', 'fetch_items', 'travel_to',
+    ]);
+    if (!longOutdoor.has(String(goal?.skill))) return;
+    this.trace.warn('audit_night_outdoor_task', {
+      companion: st.name,
+      note: `${phase} 尝试户外长动作 ${goal.skill}（仅观测，不拦截）`,
+    });
+  }
+
+  /** P0：清理已结束 goal，保留活跃目标，防止状态/监控无限膨胀。 */
+  #trimGoals() {
+    const st = this.state;
+    const goals = Array.isArray(st.goals) ? st.goals : [];
+    if (goals.length < 64) return;
+    const live = goals.filter((g) => g.status === GoalStatus.PENDING || g.status === GoalStatus.RUNNING);
+    const terminal = goals.filter((g) => g.status !== GoalStatus.PENDING && g.status !== GoalStatus.RUNNING);
+    const keepTerminal = terminal.slice(-32);
+    const before = goals.length;
+    st.goals = [...live, ...keepTerminal];
+    this.trace.info('goals_trimmed', {
+      companion: st.name,
+      note: `${before} -> ${st.goals.length}（保留 ${live.length} 活跃 + ${keepTerminal.length} 终态）`,
+    });
+  }
+
   async #tick() {
     const st = this.state;
     st.lastTickAt = Date.now();
+    this.#dispatchGate({ path: 'tick' });
+    this.#trimGoals();
 
     // 执行策略层：根据行为证据（reflex/敌对/受伤/主人危险）决定 safe-batch 还是 field-guarded
     const modeBefore = this.exec.mode;
@@ -274,13 +741,31 @@ export class Lane {
         companion: st.name,
         note: `${modeBefore} -> ${this.exec.mode}（${this.exec.reason}）`,
       });
-      if (this.exec.mode === 'field-guarded') st.execDowngradeAt = Date.now();
+      if (this.exec.mode === 'field-guarded') {
+        st.execDowngradeAt = Date.now();
+        this.#speak('danger', { reason: this.exec.reason });
+      }
+    }
+
+    // 低血提醒（触发规则：≤6 首次提醒，回到 >10 才重新武装；台词库另有冷却）
+    const hpNow = Number(st.hp);
+    if (Number.isFinite(hpNow)) {
+      if (hpNow <= 6 && !st.lowHpSpoken) {
+        this.#speak('low_hp', { hp: hpNow });
+        st.lowHpSpoken = true;
+      } else if (hpNow > 10) {
+        st.lowHpSpoken = false;
+      }
     }
 
     // 本能让路：numen 核心反射（逃/防御/脱困/MLG/溺水）正在占用同伴时，树不抢槽、不派动作。
     // 由 reflex 事件（#handleEvent）或"补丁 count=0 但槽被拒"（#maybeObserve）设置。
     if (Date.now() < (st.instinctBusyUntil || 0)) {
       st.instinctYields = (st.instinctYields || 0) + 1;
+      // 内置脑占槽时 Lua 读不到；用触手降级观测，至少知道自身/附近威胁
+      if (Date.now() - (st.lastTentacleAt || 0) > 5000) {
+        await this.#tryTentacleObserve('instinct_busy');
+      }
       return;
     }
 
@@ -309,12 +794,32 @@ export class Lane {
     // 1) 观测（快/慢分层；动作刚结束时强制刷新一次）
     await this.#maybeObserveFast();
     await this.#maybeObserve();
+    // 触手是主感知源之一，不再只在槽被占时兜底：地形/水/实体/昼夜按 primaryObserveMs 更新
+    await this.#maybeTentaclePrimary();
+
+    // 本能在动且观测被拒：本 tick 不推进计划/目标，等观测恢复（避免 resume→dispatch→suspend 空转）
+    if (st.instinctBlocked) return;
+
+    // 新世界没有地点簿时，第一次干燥安全观测就自动记“家”，否则 safety_hold/回安全屋会 no_home
+    this.#ensureHomeAnchor();
+
+    // 1.6) 重启后续跑：先读世界谓词，已完成就不重放；未完成才重开 SOP
+    // 放在需求板之前：否则需求板刚排的 fetch/feed goal 会让 pending 续跑永远被跳过
+    if (this.#maybeResumeGoal()) return;
+
+    // 1.6) 动态需求板：按状态升降"武器/工具/夜里被追"的优先级，并自动排/撤战略目标
+    this.#syncNeeds(Date.now());
+
+    // 1.7) 效用仲裁试点：安全档且无紧急目标/计划时，低优先级存素材
+    if (this.#maybeUtility(Date.now())) return;
 
     // 1.5) 日程：按"天黑/天亮 + 有没有记家"选当前时段段（纯查表，供中断表与仲裁用）
     this.#updateSchedule();
+    this.#auditClock();
 
     // 2) 中断/抢占：**先于下一个动作**执行，这样分片之间能及时响应
     if (this.#maybeInterrupt()) return;
+    this.#maybeEmergencyShelter();
 
     // 3) 队列里已有目标（中断目标 / LLM 指令 / 计划步骤）：执行
     const goal = st.nextGoal();
@@ -343,7 +848,11 @@ export class Lane {
     const llmRecent = !!st.lastLlmGoalAt && Date.now() - st.lastLlmGoalAt < graceMs;
     if (!llmBusy && !llmRecent) {
       if (!planAlive(st.plan)) await this.#arbitrate();
-      if (!st.nextGoal() && !planAlive(st.plan)) await this.#maybeLeash();
+      if (!st.nextGoal() && !planAlive(st.plan)) {
+        // 牵引绳已移除：不再用固定距离把同伴被动拉回主人/家；
+        // 回哪里由优先度系统/中断表决定。
+        // await this.#maybeLeash();
+      }
       if (!st.nextGoal() && !planAlive(st.plan)) await this.#maybeIdle();
     }
   }
@@ -510,15 +1019,52 @@ export class Lane {
    * 大脑入口（MCP tree_task / 控制 API / 自动规则共用）：
    * 模糊意图 → 配方 → 建计划。同一时间只允许一个计划。
    */
-  startPlan({ intent, source = 'llm', deadlineSeconds = null, overrides = {} }) {
+  startPlan({ intent, source = 'llm', deadlineSeconds = null, overrides = {}, resume = false }) {
     const st = this.state;
     if (!this.planner) return { ok: false, reason: 'planner_unavailable' };
+    // 优先度闸门：有活跃需求/战略意图时，自动计划不再绕过仲裁自行启动。
+    if (source === 'auto' && !resume) {
+      // 必须工具的自动计划先预检：没镐就不启动 mine_stone，先去补装备
+      if (intent === 'mine_stone') {
+        const pre = readinessPreflight('mine_stone', st);
+        if (!pre.ok) return { ok: false, reason: 'need_tools', missing: pre.missing };
+      }
+      const active = activeIntents(st);
+      // 安全型自动计划（回家/进食/脱困）允许启动；工作型计划让路。
+      const safetyAuto = ['go_home', 'feed', 'fish_food', 'escape_stuck'].includes(String(intent));
+      if (active.size > 0 && !safetyAuto) {
+        this.trace.info('auto_plan_yield_intent', {
+          companion: st.name,
+          note: `${intent} 让路给意图 ${[...active].join(',')}`,
+        });
+        return { ok: false, reason: 'yield_to_intent', intents: [...active] };
+      }
+    }
     // LLM 的计划优先：正在跑的自动计划让位（在途动作会自然结束，不硬中断）
     if (source === 'llm' && st.plan && st.plan.source === 'auto') {
       this.trace.warn('auto_plan_yield', {
         companion: st.name,
         note: `${st.plan.id} ${st.plan.recipeId} 让位给 LLM 任务，已中止`,
       });
+      const oldPlanId = st.plan.id;
+      let cancelledGoals = 0;
+      for (const g of st.goals || []) {
+        if (
+          g.planId === oldPlanId &&
+          (g.status === GoalStatus.PENDING || g.status === GoalStatus.RUNNING)
+        ) {
+          g.status = GoalStatus.CANCELLED;
+          g.endedAt = new Date().toISOString();
+          g.lastResult = { ok: false, kind: 'plan_takeover', message: '旧计划被 LLM 任务接管' };
+          cancelledGoals += 1;
+        }
+      }
+      if (cancelledGoals) {
+        this.trace.info('plan_takeover_cancel_goals', {
+          companion: st.name,
+          note: `${oldPlanId} 取消 ${cancelledGoals} 个 step goal`,
+        });
+      }
       this.#finishPlan(st.plan, PlanStatus.ABANDONED, 'llm_takeover', { silent: true });
     }
     if (planAlive(st.plan)) {
@@ -543,6 +1089,7 @@ export class Lane {
     }
     st.plan = plan;
     st.planHistory = [plan, ...(st.planHistory || [])].slice(0, 5);
+    this.#markGoalMilestone(plan, 'active');
     this.trace.info('plan_start', {
       companion: st.name,
       note: `${plan.id} ${plan.recipeId}「${plan.intent}」source=${source} why=${m.why}`,
@@ -553,6 +1100,7 @@ export class Lane {
       needsBrain: false,
       detail: { plan: planView(plan), why: m.why },
     });
+    this.#speak('task_start', { title: plan.intent || m.recipe.title });
     return {
       ok: true,
       plan: {
@@ -607,7 +1155,7 @@ export class Lane {
     if (it.halt) {
       if (planAlive(st.plan)) this.#finishPlan(st.plan, PlanStatus.ABANDONED, `interrupt:${it.id}`, { silent: true });
       this.trace.warn('interrupt', { companion: st.name, note: `${it.id}: ${hit.why}（停手等大脑）` });
-      const haltMs = Number(this.cfg.behavior?.survival?.starvingHaltSeconds ?? 240) * 1000;
+      const haltMs = Number(this.cfg.behavior?.survival?.stuckHaltSeconds ?? 120) * 1000;
       st.survivalHaltedUntil = Date.now() + haltMs;
       this.#escalate(it.escalate || 'stuck', {
         message: hit.why,
@@ -639,10 +1187,14 @@ export class Lane {
 
     if (it.goal) {
       this.trace.warn('interrupt', { companion: st.name, note: `${it.id}: ${hit.why}${planNote}` });
+      const decl = declarationForInterrupt(it);
       const goal = makeGoal({
         skill: it.goal.skill,
         params: it.goal.params || {},
         priority: Number(it.priority ?? 90),
+        priorityClass: priorityClassForConsequence(decl.consequence),
+        consequence: decl.consequence,
+        reversal: decl.reversal,
         note: `interrupt:${it.id}`,
       });
       st.pushGoal(goal);
@@ -651,14 +1203,426 @@ export class Lane {
     return true;
   }
 
-  /** 计划推进：恢复挂起 / doneWhen / 派下一步 / 处理 report 步。返回 true 表示本 tick 有事做。 */
-  #planControl() {
+  /**
+   * 动态需求板同步（docs/22）：
+   *  - 未满足需求 → 排队/提升 strategy.secure_gear 目标优先级；
+   *  - 已完成（含意外获得武器/工具）→ 取消排队目标、优先级降到 P5；
+   *  - 失败/等待 → 15s 重试冷却，避免每 tick 刷。
+   */
+  /** 重启后续跑：有 active profile 时，先验收世界谓词，未完成才重开 SOP。 */
+  #maybeResumeGoal() {
+    if (!this.pendingGoalResume || !this.goalSession?.store) return false;
+    const st = this.state;
+    if (st.plan || st.goals.length > 0) return false;
+    if (!st.lastObservedAt || Date.now() - Number(st.lastObservedAt) > 10_000) return false;
+    const a = this.pendingGoalResume;
+    this.pendingGoalResume = null;
+    const cp = this.goalSession.store.checkpoint;
+    if (cp?.dimension && st.dimension && cp.dimension !== st.dimension) {
+      this.trace.warn('goal_resume_invalid', {
+        companion: st.name,
+        note: `${a.id} 维度不符（${cp.dimension} vs ${st.dimension}），不恢复`,
+      });
+      return false;
+    }
+    const recipe = this.planner?.recipes?.find((r) => r.id === a.id);
+    if (!recipe) {
+      this.trace.warn('goal_resume_invalid', { companion: st.name, note: `${a.id} 配方不存在，不恢复` });
+      return false;
+    }
+    const decision = resumeDecision(a.id, st);
+    if (decision.action === 'done') {
+      const store = this.goalSession.store;
+      const m = (store.milestones || []).find((x) => x.id === a.id);
+      if (m) m.status = 'done';
+      store.activeProfile = null;
+      try {
+        saveGoalStore(this.goalStoreFile, store);
+      } catch {
+        /* ignore */
+      }
+      this.trace.info('goal_resume_done', {
+        companion: st.name,
+        note: `${a.id} 世界谓词已满足（${decision.acceptance?.predicate}），不重放`,
+      });
+      return true;
+    }
+    if (decision.action !== 'resume') {
+      this.trace.info('goal_resume_skip', {
+        companion: st.name,
+        note: `${a.id} 无验收谓词，不自动重开`,
+      });
+      return false;
+    }
+    const r = this.startPlan({ intent: a.id, source: 'auto', resume: true });
+    this.trace.info(r.ok ? 'goal_resume_start' : 'goal_resume_failed', {
+      companion: st.name,
+      note: r.ok ? `${a.id} 从 milestone 恢复 SOP` : `${a.id} 恢复失败：${r.reason}`,
+    });
+    return !!r.ok;
+  }
+
+  #syncNeeds(now = Date.now()) {
+    const st = this.state;
+    if (st.waitUntil && now < st.waitUntil) return;
+    if (!st.lastObservedAt || now - st.lastObservedAt > 10_000) return; // 观测太旧不判
+    st.needMeta ??= { retryAt: {}, lastGoalId: {} };
+    // 死亡计数：10 分钟没有新死亡就清零
+    if (st.deathAt && now - Date.parse(st.deathAt) > 10 * 60_000) st.deathCountRecent = 0;
+
+    let homeDistance = null;
+    let homeInside = false;
+    try {
+      const home = this.#homePos();
+      if (home?.pos && st.pos) {
+        homeDistance = distance3(st.pos, home.pos);
+        homeInside = atHome(st.pos, home.pos, { radius: Number(home.radius ?? 3), yTolerance: 2 });
+      }
+    } catch {
+      /* 没有地点簿也不影响武器/工具需求 */
+    }
+    const opt = {
+      homeDistance,
+      homeInside,
+      deathRecent: st.deathAt && now - Date.parse(st.deathAt) < 120_000,
+      deathsRecent: Number(st.deathCountRecent ?? 0),
+    };
+    const needs = evaluateNeeds(st, opt);
+    st.learning ??= createLearningState();
+    // 三线状态：本能 / 压力 / 注意（纯计算，不执行动作）
+    const facts = factsOf(st, { homeDistance });
+    st.drives = updateDrives(st.drives, facts, now, st);
+    st.instinct = instinctState(st, facts);
+    st.failure ??= createFailureState();
+    st.performanceFactor = fatigueFactor(st.drives);
+    st.readiness = evaluateReadiness(st);
+    const dayIndex = worldDayIndex(st);
+    if (shouldAuditDawn(st, dayIndex)) {
+      st.readinessAuditDay = dayIndex;
+      st.needMeta.retryAt ??= {};
+      delete st.needMeta.retryAt.get_weapon;
+      delete st.needMeta.retryAt.get_tools;
+      this.trace.info('readiness_audit', {
+        companion: st.name,
+        note: st.readiness.ok
+          ? `装备检查通过（day ${dayIndex}）`
+          : `装备缺口：${st.readiness.missing.map((m) => m.label).join(',')}`,
+      });
+    }
+    st.attention = attentionState(facts, st.drives, {
+      currentIntent: st.intentState?.current?.intent ?? st.plan?.intent ?? null,
+      plan: st.plan,
+    });
+    // 自动 bootstrap/craft 计划正在做装备时，不再用 secure_gear 抢它的步骤（避免优先级内耗）
+    const gearPlanRunning =
+      planAlive(st.plan) &&
+      ['bootstrap_kit', 'craft_tools', 'craft_gear'].includes(st.plan.recipeId);
+    const foodPlanRunning = planAlive(st.plan) && st.plan.recipeId === 'feed';
+    const strategyMap = {
+      night_chase: 'night_hold',
+      safety_hold: 'safety_hold',
+      get_weapon: 'secure_gear',
+      get_tools: 'secure_gear',
+      night_safety: 'prepare_for_night',
+      food_low: 'secure_food',
+      stuck_escape: 'escape_stuck',
+    };
+
+    // 1) 已满足的需求：取消对应排队目标
+    for (const n of needs) {
+      const goal = st.goals.find(
+        (g) => g.note === `need:${n.id}` && (g.status === 'pending' || g.status === 'running'),
+      );
+      if (!n.done) continue;
+      if (goal && goal.status === 'pending') {
+        goal.status = GoalStatus.CANCELLED;
+        goal.endedAt = new Date().toISOString();
+        goal.lastResult = { ok: true, reason: 'need_satisfied' };
+        this.trace.info('need_satisfied', { companion: st.name, note: `${n.id} 已满足，取消排队目标` });
+      }
+      if (goal) goal.priority = 5;
+      delete st.needMeta.retryAt[n.id];
+    }
+
+    // 2) 生成候选（只保留可执行的），同一意图合并为最高分
+    const byIntent = new Map();
+    for (const n of needs) {
+      if (n.done || n.priority <= 5) continue;
+      // 夜里不反复排“出去补装备”：secure_gear 也只会 wait，等天亮再排
+      if (st.dark && (n.id === 'get_weapon' || n.id === 'get_tools')) continue;
+      if (gearPlanRunning && (n.id === 'get_weapon' || n.id === 'get_tools')) continue;
+      if (n.id === 'food_low' && now < (st.foodRetryAt || 0)) continue;
+      // 有钓竿的白天：先让自动 fish_food 链尝试，不先排 secure_food
+      const hasRod = (st.inventory || []).some(
+        (x) => (x.count ?? 0) > 0 && String(x.item ?? '').endsWith('fishing_rod'),
+      );
+      const fishPlanRunning = planAlive(st.plan) && st.plan.recipeId === 'fish_food';
+      if (
+        n.id === 'food_low' &&
+        hasRod &&
+        !st.dark &&
+        !fishPlanRunning &&
+        now >= Number(st.fishRetryAt || 0)
+      ) {
+        continue;
+      }
+      if (n.id === 'food_low' && now < (st.fishRetryAt || 0)) continue;
+      if (n.id === 'food_low' && foodPlanRunning) continue;
+      if (n.id === 'food_low' && (st.foodCount ?? 0) > 0) continue;
+      if (now < (st.needMeta.retryAt[n.id] || 0)) continue;
+      const intent = intentForNeed(n.id);
+      const strategyId = strategyMap[n.id] || intentById(intent)?.strategy || 'secure_gear';
+      const hardSafety =
+        !!st.instinct?.active && ['safety_hold', 'stuck_escape', 'night_chase'].includes(n.id);
+      const basePriority =
+        Number(n.priority) +
+        driveBonusForNeed(n.id, st.drives) +
+        attentionBonusForNeed(n.id, st.attention) +
+        learningBonus(st.learning, strategyId);
+      const cand = {
+        need: n,
+        intent,
+        strategyId,
+        // 硬安全信号只做 OR 门槛，不重复叠加 drive/attention/instinct 分
+        priority: hardSafety ? 100 : Math.max(0, Math.min(100, basePriority)),
+        switchCost: Number(intentById(intent)?.switchCost ?? 10),
+      };
+      const key = intent || n.id;
+      const prev = byIntent.get(key);
+      if (!prev || cand.priority > prev.priority) byIntent.set(key, cand);
+    }
+    const candidates = [...byIntent.values()].sort((a, b) => b.priority - a.priority);
+
+    // 3) 清理历史多目标：同一时间只允许一个需求目标
+    const needGoals = st.goals.filter(
+      (g) => (g.status === 'pending' || g.status === 'running') && String(g.note || '').startsWith('need:'),
+    );
+    let current = needGoals.find((g) => g.status === 'running') || needGoals[0] || null;
+    for (const g of needGoals) {
+      if (g !== current && g.status === 'pending') {
+        g.status = GoalStatus.CANCELLED;
+        g.endedAt = new Date().toISOString();
+        g.lastResult = { ok: true, reason: 'superseded_by_single_intent' };
+        this.trace.info('need_superseded', {
+          companion: st.name,
+          note: `${g.note} 被单意图调度取消`,
+        });
+      }
+    }
+
+    // 4) 当前目标同意图 → 只更新优先级；否则按切换成本决定是否换
+    const top = candidates[0] || null;
+    // 可观测：当前意图 + 候选分数/切换成本
+    st.intentState = {
+      at: new Date().toISOString(),
+      current: current
+        ? {
+            goalId: current.id,
+            need: String(current.note || '').replace(/^need:/, ''),
+            intent: current.intent || intentForNeed(String(current.note || '').replace(/^need:/, '')),
+            priority: Number(current.priority ?? 0),
+            status: current.status,
+          }
+        : planAlive(st.plan)
+          ? {
+              planId: st.plan.id,
+              recipeId: st.plan.recipeId,
+              intent: st.plan.intent || null,
+              source: st.plan.source,
+              priority: null,
+              status: st.plan.status,
+            }
+          : null,
+      candidates: candidates.map((c) => ({
+        need: c.need.id,
+        intent: c.intent,
+        strategy: c.strategyId,
+        priority: c.priority,
+        switchCost: c.switchCost,
+      })),
+    };
+    if (current) {
+      const currentNeed = String(current.note || '').replace(/^need:/, '');
+      const currentIntent = current.intent || intentForNeed(currentNeed);
+      const sameIntent = candidates.find((c) => (c.intent || c.need.id) === currentIntent);
+      if (sameIntent) {
+        if (current.status === 'pending') current.priority = Math.max(Number(current.priority ?? 0), sameIntent.priority);
+        return;
+      }
+      if (!top) return;
+      if (current.status === 'running') {
+        // 运行中的意图有承诺：只有新候选显著更高才允许抢占
+        if (top.priority <= Number(current.priority ?? 0) + Math.max(10, top.switchCost)) return;
+      } else if (top.priority <= Number(current.priority ?? 0) + top.switchCost) {
+        return;
+      }
+      // 只有 pending 才取消；running 交给中断/自然结束
+      if (current.status === 'pending') {
+        current.status = GoalStatus.CANCELLED;
+        current.endedAt = new Date().toISOString();
+        current.lastResult = { ok: true, reason: 'switched_intent' };
+        this.trace.info('need_switch', {
+          companion: st.name,
+          note: `${current.note} -> ${top.need.id}（${top.priority} > ${current.priority} + ${top.switchCost}）`,
+        });
+      } else {
+        return;
+      }
+    }
+    if (!top) return;
+
+    // 5) 只创建一个当前意图目标
+    const g = makeGoal({
+      skill: 'strategy',
+      params: { strategy: top.strategyId, params: { need: top.need.id } },
+      priority: top.priority,
+      priorityClass: declarationForStrategy(top.strategyId).priorityClass,
+      consequence: declarationForStrategy(top.strategyId).consequence,
+      reversal: declarationForStrategy(top.strategyId).reversal,
+      note: `need:${top.need.id}`,
+    });
+    g.intent = top.intent;
+    st.pushGoal(g);
+    st.needMeta.lastGoalId[top.need.id] = g.id;
+    this.trace.info('need_select', {
+      companion: st.name,
+      note: `${top.need.id} priority=${top.priority} -> ${g.id} ${top.strategyId}（单意图调度）`,
+    });
+  }
+
+  /**
+   * 效用仲裁试点（docs/24）：安全档、无紧急目标/计划时，按分数决定要不要做
+   * store_materials（存素材回家）。优先级压到 15~55，抢不过需求/计划。
+   */
+  #maybeUtility(now = Date.now()) {
+    const st = this.state;
+    if (this.cfg.behavior?.utility?.enabled === false) return false;
+    if (this.exec.mode !== 'safe-batch') return false;
+    if (st.actionsLocked || st.actionLock) return false;
+    if (st.goals.some((g) => g.status === 'pending' || g.status === 'running')) return false;
+    if (planAlive(st.plan)) return false;
+    if (now < (st.utilityNextAt || 0)) return false;
+
+    let homePlace = null;
+    try {
+      const b = this.places?.list ? this.places.list({ kind: 'base' })[0] : null;
+      if (b?.pos) homePlace = b.pos;
+    } catch {
+      /* no places */
+    }
+    const candidate = storeMaterialsCandidate({ state: st, homePlace });
+    const picked = chooseCandidate(
+      [candidate],
+      { state: st, homePlace },
+      this.arbiter,
+      { now },
+    );
+    if (!picked.choice) return false;
+    const total = Number(picked.evals?.find((e) => e.id === 'store_materials')?.total ?? 20);
+    const priority = Math.max(15, Math.min(55, Math.round(total)));
+    const g = makeGoal({
+      skill: 'strategy',
+      params: { strategy: 'store_materials', params: {} },
+      priority,
+      priorityClass: declarationForStrategy('store_materials').priorityClass,
+      consequence: declarationForStrategy('store_materials').consequence,
+      reversal: declarationForStrategy('store_materials').reversal,
+      note: 'util:store_materials',
+    });
+    st.pushGoal(g);
+    st.utilityNextAt = now + Number(this.cfg.behavior?.utility?.minIntervalSeconds ?? 180) * 1000;
+    st.utilityLastChoice = { id: 'store_materials', total, at: now };
+    this.trace.info('utility_choice', {
+      companion: st.name,
+      note: `store_materials score=${Math.round(total)} -> ${g.id}`,
+    });
+    return true;
+  }
+
+  /** 计划推进：恢复挂起 / doneWhen / 派下一步 / 处理 report 步。返回 true 表示本 tick 有事做。 */  #planControl() {
     const st = this.state;
     const plan = st.plan;
     if (!planAlive(plan)) return false;
 
+    // 单一来源：plan gate 与 status 都以 this.exec 为准，禁止各说各话。
+    const gateModeBefore = st.execMode;
+    st.execMode = this.exec.mode;
+    st.execReason = this.exec.reason;
+    if (gateModeBefore && gateModeBefore !== st.execMode) {
+      this.trace.info('exec_state_reconciled', {
+        companion: st.name,
+        note: `${gateModeBefore} -> ${st.execMode}（${st.execReason}）`,
+      });
+    }
+
+    observePlan(this.dispatchWatchdog, plan, Date.now());
+    const stall = checkDispatchWatchdog(
+      this.dispatchWatchdog,
+      plan,
+      Date.now(),
+      Number(this.cfg.behavior?.progressWatchdogSeconds ?? 20) * 1000,
+    );
+    if (stall.stalled) {
+      this.trace.warn('plan_dispatch_stalled', { companion: st.name, note: stall.reason });
+      suspendPlan(plan, 'no_progress');
+      this.#escalate('plan_stalled', {
+        message: stall.reason,
+        hint: 'plan 已 active 但长时间没有 atom begin/steps 进展；已挂起，禁止静默重试。',
+      });
+      return true;
+    }
+
+    // 村民式“门控不被动作锁冻结”：锁只阻止执行，不阻止判断。
+    if (st.actionLock) {
+      const ownerId = st.current?.goalId ?? null;
+      const ownerGoal = (st.goals || []).find((g) => g.id === ownerId) ?? null;
+      if (!ownerGoal || ownerGoal.planId !== plan.id) {
+        if (plan.gateMode === 'stalled') return true;
+        plan.gateReason = `lock_held_by:${ownerGoal?.skill ?? ownerId ?? 'unknown'}`;
+        plan.gateMode = 'action_lock';
+        if (plan.status !== PlanStatus.SUSPENDED) {
+          suspendPlan(plan, 'action_lock');
+          this.trace.warn('plan_lock_yield', {
+            companion: st.name,
+            note: `${plan.id} 让路：${plan.gateReason}`,
+          });
+        }
+        return true;
+      }
+    }
+
+    // 执行闸门：field-guarded 时暂停自动计划（长生产链），等环境安全再恢复。
+    // 例外：feed 是自保计划；有食物时只吃，没食物但 HP 很低且无敌对时也要允许它去找吃的，
+    // 否则会进入"低血→field-guarded→不觅食→回不了血"的死锁。
+    const maxHp = Number(st.maxHp ?? 20) || 20;
+    const hpPctPlan = (Number(st.hp ?? maxHp) / maxHp) * 100;
+    const panicPctPlan = Number(st.survival?.panicHpPercent ?? 60);
+    const criticalFeed =
+      plan.recipeId === 'feed' &&
+      (st.hostileCount ?? 0) === 0 &&
+      hpPctPlan <= panicPctPlan;
+    if (
+      this.exec.mode === 'field-guarded' &&
+      this.execPolicy?.gateLongSkills !== false &&
+      plan.source === 'auto' &&
+      plan.status !== PlanStatus.SUSPENDED &&
+      plan.recipeId !== 'go_home' &&
+      plan.recipeId !== 'fish_food' &&
+      !(plan.recipeId === 'feed' && ((st.foodCount ?? 0) > 0 || criticalFeed))
+    ) {
+      suspendPlan(plan, 'field_guarded');
+      plan.gateReason = this.exec.reason;
+      plan.gateMode = this.exec.mode;
+      this.trace.info('exec_gate_plan', {
+        companion: st.name,
+        note: `${plan.id} ${plan.recipeId} 因 field-guarded 挂起 gate=${plan.gateMode}/${plan.gateReason}`,
+      });
+      return true;
+    }
+
     // 挂起中：等中断动作跑完、并且槽/观测恢复正常，才恢复
     if (plan.status === PlanStatus.SUSPENDED) {
+      if (plan.suspendedBy === 'action_lock' && st.actionLock) return true;
       const pendingInterrupt = st.goals.some(
         (g) =>
           (g.status === 'pending' || g.status === 'running') &&
@@ -666,19 +1630,49 @@ export class Lane {
           g.note.startsWith('interrupt:'),
       );
       if (pendingInterrupt || st.actionLock) return true;
-      // slot_blocked / timeout 挂起的：观测还在被拒就先别动（docs/12 §3.1）
+      // 紧急吃饭优先于挂起的自动计划：否则 field-guarded 会让 craft 计划一直占着
+      // planControl，arbitrate 永远没机会启动 feed（HP 低、背包有食物也不吃）。
+      const emergencyFeed =
+        plan.recipeId !== 'feed' &&
+        (st.foodCount ?? 0) > 0 &&
+        ((Number(st.hunger ?? 20) <= Number(this.cfg.behavior?.survival?.eatHunger ?? 6)) ||
+          hpPctPlan <= panicPctPlan);
+      if (emergencyFeed) {
+        this.trace.warn('plan_emergency_yield', {
+          companion: st.name,
+          note: `${plan.id} ${plan.recipeId} 让位给紧急吃饭（hp ${hpPctPlan}% hunger ${st.hunger}）`,
+        });
+        this.#finishPlan(plan, PlanStatus.ABANDONED, 'emergency_feed', { silent: true });
+        st.foodRetryAt = 0;
+        return false;
+      }
+      // slot_blocked / timeout 挂起的：必须有挂起后的成功观测，且槽计数已清零，才允许恢复
+      const suspendedAtMs = plan.suspendedAt ? Date.parse(plan.suspendedAt) : 0;
+      const observedAfterSuspend =
+        suspendedAtMs > 0 && Number(st.lastSuccessfulObserveAt ?? st.lastObservedAt ?? 0) > suspendedAtMs;
       if ((plan.suspendedBy === 'slot_blocked' || plan.suspendedBy === 'timeout') && (st.slotBlocked ?? 0) > 0) {
         return true;
       }
+      if ((plan.suspendedBy === 'slot_blocked' || plan.suspendedBy === 'timeout') && !observedAfterSuspend) {
+        return true;
+      }
+      // field-guarded 挂起：等环境风险解除再恢复，别在风险窗口里反复重试
+      if (plan.suspendedBy === 'field_guarded' && this.exec.mode === 'field-guarded') return true;
       // 刚挂起不到 2 秒，先让状态稳定一下
       if (plan.suspendedAt && Date.now() - Date.parse(plan.suspendedAt) < 2000) return true;
       resumePlan(plan);
+      plan.gateReason = null;
+      plan.gateMode = null;
+      plan.resumeCount = Number(plan.resumeCount ?? 0) + 1;
       if (st.planRestartRequested) {
         st.planRestartRequested = false;
         plan.cursor = plan.steps[0]?.as ?? null;
         plan.visits = plan.cursor ? { [plan.cursor]: 1 } : {};
       }
-      this.trace.info('plan_resume', { companion: st.name, note: `${plan.id} ${plan.recipeId} 恢复` });
+      this.trace.info('plan_resume', {
+        companion: st.name,
+        note: `${plan.id} ${plan.recipeId} 恢复（第 ${plan.resumeCount} 次，观测已确认）`,
+      });
     }
 
     // doneWhen：条件满足 = 计划正常结束（例如"守到天亮"）。
@@ -713,11 +1707,11 @@ export class Lane {
         hunger: st.hunger,
         foodCount: st.foodCount,
         animalCount: st.animalCount,
-        hint: '计划自己走不通，树已停手等大脑决定下一步。',
+        hint: '找食物失败；不停手，去做别的，过一会再试。',
       });
       if (step.escalate === 'starving') {
-        st.survivalHaltedUntil =
-          Date.now() + Number(this.cfg.behavior?.survival?.starvingHaltSeconds ?? 240) * 1000;
+        st.foodRetryAt =
+          Date.now() + Number(this.cfg.behavior?.survival?.foodRetrySeconds ?? 60) * 1000;
         this.#speak('hungry');
       }
       return true;
@@ -732,7 +1726,30 @@ export class Lane {
       return true;
     }
     st.currentPlanStep = step.as;
+    // 同一步已在队列里（被 exec-policy 暂缓/正在跑）就不要再 push，否则会堆出成百上千个重复 step goal
+    const sameStep = (st.goals || []).find(
+      (g) =>
+        g.planId === plan.id &&
+        g.stepAs === step.as &&
+        (g.status === GoalStatus.PENDING || g.status === GoalStatus.RUNNING),
+    );
+    if (sameStep) return true;
     st.pushGoal(built.goal);
+    try {
+      this.trace.info('plan_step_push', {
+        companion: st.name,
+        note: JSON.stringify({
+          planId: plan.id,
+          step: step.as,
+          skill: step.skill,
+          priority: 10,
+          goals: st.goals.length,
+          at: Date.now(),
+        }),
+      });
+    } catch {
+      /* observational only */
+    }
     return true;
   }
 
@@ -784,6 +1801,28 @@ export class Lane {
       case 'retry':
         return; // 下一 tick #planControl 派下一步
       case 'suspend':
+        // 挂起时清掉该计划残留的 step goal，避免 resume 前后同一 step 重复堆积
+        for (const g of st.goals || []) {
+          if (
+            g.planId === plan.id &&
+            (g.status === GoalStatus.PENDING || g.status === GoalStatus.RUNNING)
+          ) {
+            g.status = GoalStatus.CANCELLED;
+          }
+        }
+        // action 结果 slot_blocked 也要计入槽占用：否则 resume 门看到 slotBlocked=0，2s 后就空转恢复
+        if (String(decision.by) === 'slot_blocked') {
+          st.slotBlocked = Number(st.slotBlocked ?? 0) + 1;
+          plan.slotSuspendCount = Number(plan.slotSuspendCount ?? 0) + 1;
+          if (plan.slotSuspendCount > 2) {
+            this.trace.warn('plan_slot_retry_exhausted', {
+              companion: st.name,
+              note: `${plan.id} ${plan.recipeId} 连续 slot_blocked ${plan.slotSuspendCount} 次，停止空转`,
+            });
+            this.#finishPlan(plan, PlanStatus.FAILED, 'slot_blocked_retry_exhausted');
+            return;
+          }
+        }
         suspendPlan(plan, decision.by || 'blocked');
         this.trace.warn('plan_suspended', {
           companion: st.name,
@@ -806,11 +1845,11 @@ export class Lane {
           hunger: st.hunger,
           foodCount: st.foodCount,
           animalCount: st.animalCount,
-          hint: '计划已停，等大脑决定下一步。',
+          hint: '计划已停；找食物失败不停手，先做别的，过一会再试。',
         }, { needsBrain: waken });
         if (escalate === 'starving') {
-          st.survivalHaltedUntil =
-            Date.now() + Number(this.cfg.behavior?.survival?.starvingHaltSeconds ?? 240) * 1000;
+          st.foodRetryAt =
+            Date.now() + Number(this.cfg.behavior?.survival?.foodRetrySeconds ?? 60) * 1000;
           this.#speak('hungry');
         }
         return;
@@ -831,12 +1870,99 @@ export class Lane {
     }
   }
 
+  /** P0-b：把当前 plan 映射成 GoalProfile/milestone（只记录，不做自动续跑）。 */
+  #markGoalMilestone(plan, status) {
+    if (!this.goalSession?.store || !this.goalStoreFile || !plan) return;
+    const st = this.state;
+    const store = this.goalSession.store;
+    store.worldId = this.cfg.goalStore?.worldId || st.dimension || 'default';
+    store.companionId = st.name;
+    store.activeProfile =
+      status === 'active'
+        ? {
+            id: plan.recipeId,
+            title: plan.intent || plan.recipeId,
+            source: plan.source || 'unknown',
+          }
+        : null;
+    const id = `${plan.recipeId}`;
+    let m = (store.milestones || []).find((x) => x.id === id);
+    if (!m) {
+      m = { id, title: plan.intent || plan.recipeId, status, attempts: 0, lastProgressDay: null };
+      store.milestones.push(m);
+    }
+    m.status = status;
+    m.attempts = Number(m.attempts || 0) + (status === 'active' ? 1 : 0);
+    m.lastProgressDay = worldDayIndex(st) ?? m.lastProgressDay;
+    store.checkpoint = {
+      pos: st.pos ? { x: st.pos.x, y: st.pos.y, z: st.pos.z } : null,
+      dimension: st.dimension ?? null,
+      gameTime: st.gameTime ?? null,
+      inventorySummary: Object.fromEntries(
+        (st.inventory || [])
+          .filter((x) => Number(x.count) > 0)
+          .map((x) => [String(x.item), Number(x.count)]),
+      ),
+    };
+    try {
+      saveGoalStore(this.goalStoreFile, store);
+      this.trace.info('goal_store_saved', {
+        companion: st.name,
+        note: `${id} → ${status}`,
+      });
+    } catch (e) {
+      this.trace.warn('goal_store_save_failed', {
+        companion: st.name,
+        note: String(e?.message ?? e),
+      });
+    }
+  }
+
   /** 结束计划（清槽、取消该计划残留的步骤目标、记账、按来源决定叫不叫醒大脑）。 */
   #finishPlan(plan, status, reason, { silent = false } = {}) {
     const st = this.state;
     if (!plan || st.plan !== plan) return;
+    if (status !== PlanStatus.DONE) this.#noteFailure(reason || status, 'plan', true, plan.id, st.lastAtomId ?? null);
+    if (status === PlanStatus.DONE) {
+      st.blocked = null;
+      clearTerminationAttempt(st.failureTermination, 'plan', plan.id);
+    }
+    this.#markGoalMilestone(plan, status === PlanStatus.DONE ? 'done' : 'failed');
     const view = planView(plan);
     finishPlan(plan, status, reason);
+    // 觅食计划失败后进入冷却：别每 2~3 秒立刻重开同一个 feed 计划
+    if (plan.recipeId === 'feed' && status !== PlanStatus.DONE) {
+      st.foodRetryAt =
+        Date.now() + Number(this.cfg.behavior?.survival?.foodRetrySeconds ?? 60) * 1000;
+    }
+    if (plan.recipeId === 'fish_food') {
+      const failedStep = view.cursor || plan.cursor || '';
+      const rodFailed = (plan.stepResults || []).some((r) => r.as === 'rod' && r.ok === false);
+      if (status === PlanStatus.DONE) {
+        st.helpNeeded = null;
+        st.fishRetryAt = 0;
+      } else {
+        st.fishRetryAt = Date.now() + 180_000;
+      }
+      if (status === PlanStatus.DONE) {
+        // 成功：清短报
+      } else if (rodFailed) {
+        this.#reportHelp(
+          'rod_unavailable',
+          '拿不到钓竿',
+          '请把钓竿放进附近箱子/直接给同伴，或清掉箱子前面挡住的方块',
+        );
+      } else if (failedStep === 'fish') {
+        this.#reportHelp(
+          'ice_or_water',
+          '钓鱼失败：冰面/水面无法处理',
+          '请在冰面开一个洞，或指一个开放水域；numen 的安全挖掘不允许自动破冰',
+        );
+      } else {
+        // 钓鱼本身成功，失败在烹饪/存储：不要再误报“需要开冰洞”
+        st.helpNeeded = null;
+      }
+    }
     st.plan = null;
     st.currentPlanStep = null;
     // 该计划还没执行的步骤目标一律作废，别留在队列里
@@ -855,6 +1981,11 @@ export class Lane {
     });
     if (silent) return; // 失败/上报由调用方负责，避免同一次失败报两遍
     const isDone = status === PlanStatus.DONE;
+    // 游戏内短报：项目级成功/失败，带项目名和简短原因。
+    this.#speak(isDone ? 'task_done' : 'task_failed_detail', {
+      title: plan.title || plan.recipeId,
+      reason: KIND_WORDS[String(reason)] ?? String(reason ?? '没成'),
+    });
     this.inbox.push({
       kind: isDone ? 'plan_done' : 'plan_failed',
       companion: st.name,
@@ -918,6 +2049,35 @@ export class Lane {
 
   // ── 日程（M1.5）：时段 → 允许做什么；规则在 schedule.mjs，这里只查表 ──
 
+  /** 新世界第一次“干燥且位置有效”的观测自动记家；已有 base 不重复记。 */
+  #ensureHomeAnchor() {
+    const st = this.state;
+    if (!this.cfg.goalStore?.enabled || !this.places?.record) return;
+    if (this.#homePos()) return;
+    if (!st.pos || st.inWater) return;
+    if (![st.pos.x, st.pos.y, st.pos.z].every(Number.isFinite)) return;
+    try {
+      this.places.record({
+        name: this.cfg.leash?.placeName || '家',
+        kind: 'base',
+        dimension: st.dimension,
+        pos: { x: st.pos.x, y: st.pos.y, z: st.pos.z },
+        note: 'P0 auto anchor: first dry observation in new world',
+        source: 'auto',
+        companion: st.name,
+      });
+      this.trace.info('home_anchor_auto', {
+        companion: st.name,
+        note: `自动记录安全点 ${Math.round(st.pos.x)},${Math.round(st.pos.y)},${Math.round(st.pos.z)}`,
+      });
+    } catch (e) {
+      this.trace.warn('home_anchor_failed', {
+        companion: st.name,
+        note: String(e?.message ?? e),
+      });
+    }
+  }
+
   /** 地点簿里的"家"坐标（没有/不合法返回 null）。 */
   #homePos() {
     const st = this.state;
@@ -962,7 +2122,9 @@ export class Lane {
       this.trace.info('schedule', {
         companion: st.name,
         note: `${seg.id}「${seg.title}」${st.dark ? '天黑' : '天亮'}`
-          + `，牵引绳≤${seg.leash?.maxDistance ?? this.cfg.leash?.maxDistance ?? 32}`
+          + (this.cfg.leash?.enabled
+            ? `，牵引绳≤${seg.leash?.maxDistance ?? this.cfg.leash?.maxDistance ?? 32}`
+            : '')
           + `${st.schedule.nightGuard ? '，守家模式' : ''}`,
       });
     }
@@ -1013,11 +2175,51 @@ export class Lane {
     const calm = (st.hostileCount ?? 0) === 0 || hpPct > 80;
 
     if (!halted && calm) {
+      // 觅食计划的放行条件：安全档，或背包里已有食物（只吃、不出去找）。
+      // 例外：HP 已经很低且附近没有敌人时，即使 field-guarded(hp_low) 也必须允许觅食，
+      // 否则会死锁：低血→field-guarded→不找食物→没法回血→永远低血。
+      const criticalRecovery = hpPct <= panicPct && (st.hostileCount ?? 0) === 0;
+      const feedAllowedByMode = this.exec.mode === 'safe-batch' || hasFood || criticalRecovery;
+      // 食物战略（secure_food）在队列/执行时，旧的 feed 计划让路，避免双份吃东西/重复找食物
+      const foodStrategyActive = st.goals.some(
+        (g) =>
+          (g.status === 'pending' || g.status === 'running') &&
+          g.skill === 'strategy' &&
+          g.params?.strategy === 'secure_food',
+      );
       const wantFeed =
         hunger <= Number(s.eatHunger ?? 6) ||
         (hunger <= Number(s.forageHunger ?? 12) && !hasFood) ||
         (hpPct <= panicPct && hasFood && hunger < Number(s.healHunger ?? 18));
-      if (wantFeed) {
+      // 找食物连续失败后冷却：没食物时暂停自动 feed，先做别的；有食物仍允许吃
+      const foodCooling = now < (st.foodRetryAt || 0);
+      const wantFeedNow = wantFeed && (!foodCooling || hasFood);
+      // 食物来源选择：有钓竿时先试钓鱼链，再回落到通用 secure_food/feed
+      const hasRod = (st.inventory || []).some(
+        (x) => (x.count ?? 0) > 0 && String(x.item ?? '').endsWith('fishing_rod'),
+      );
+      const fishCooling = now < (st.fishRetryAt || 0);
+      if (wantFeedNow && hasRod && !foodStrategyActive && !fishCooling && !st.dark && calm) {
+        const started = this.startPlan({ intent: 'fish_food', source: 'auto' });
+        if (started.ok) {
+          this.trace.info('auto_plan', {
+            companion: st.name,
+            note: `fish_food(hunger ${hunger}, hp ${hpPct}%) -> ${started.plan.id}`,
+          });
+          return;
+        }
+      }
+      if (wantFeedNow && foodStrategyActive) {
+        // 交给 secure_food 处理，不启动旧 feed 计划
+      } else if (wantFeedNow && !feedAllowedByMode) {
+        if (Date.now() - (st.lastFeedDeferredAt || 0) > 30_000) {
+          st.lastFeedDeferredAt = Date.now();
+          this.trace.info('feed_deferred', {
+            companion: st.name,
+            note: `hunger ${hunger} 但 field-guarded(${this.exec.reason}) 且无食物 → 暂不出门找`,
+          });
+        }
+      } else if (wantFeedNow) {
         const started = this.startPlan({ intent: 'feed', source: 'auto' });
         if (started.ok) {
           this.trace.info('auto_plan', {
@@ -1029,33 +2231,33 @@ export class Lane {
       }
     }
 
-    // 重伤 + 没吃的 + 附近安全：回主人身边（要保护、等人给吃的）
-    if (
-      hpPct <= panicPct &&
-      !hasFood &&
-      (st.hostileCount ?? 0) === 0 &&
-      st.ownerOnline &&
-      (st.ownerDistance ?? 999) > Number(s.regroupDistance ?? 8) &&
-      allowKey('regroup') &&
-      ready('regroup', 30)
-    ) {
-      push('regroup', 'approach_owner', { range: 4, chunkSeconds: 8, maxChunks: 4 }, 44,
-        `hp ${hpPct}%、没食物、附近安全，回主人身边`);
-      return;
-    }
+    // 重伤 + 没吃的 + 附近安全：不再有硬编码“回主人”行为；
+    // 回家/回主人由优先度系统按需求决定（避免被动拉扯打断任务）。
 
     // ── 日程：白天自动开工（候选与冷却全部来自 schedule.mjs 的 work）──
     // 只在 survival 模式自动开工；combat/production 是 LLM 显式选的行为，不在这里管。
+    // 优先度 MVP：有待执行/执行中的意图时，自动工作计划让路，避免 plan 和需求抢。
+    const activeIntentNow = activeIntents(st);
+    if (activeIntentNow.size > 0) {
+      if (Date.now() - (st.lastIntentGateTraceAt || 0) > 15_000) {
+        st.lastIntentGateTraceAt = Date.now();
+        this.trace.info('auto_work_yield', {
+          companion: st.name,
+          note: `active intents: ${[...activeIntentNow].join(',')}；自动工作计划让路`,
+        });
+      }
+      return;
+    }
     if (st.mode === 'survival' && allowKey('dayWork') && !halted) {
       for (const w of seg.work || []) {
-        if (w.requires === 'pickaxe' && !hasTool(st.inventory, 'pickaxe')) continue;
+        if (w.requires === 'pickaxe' && !hasUsableTool(st, 'pickaxe')) continue;
         // 装备兜底：有武器就不需要 bootstrap（死亡重生后没武器才会走）
         if (w.requires === 'no_weapon' && st.weapon) continue;
         // 采集工具缺了才补（镐+斧都有就跳过 craft_tools）
         if (
           w.requires === 'missing_tool' &&
-          hasTool(st.inventory, 'pickaxe') &&
-          hasTool(st.inventory, 'axe')
+          hasUsableTool(st, 'pickaxe') &&
+          hasUsableTool(st, 'axe')
         ) {
           continue;
         }
@@ -1077,6 +2279,19 @@ export class Lane {
           });
         }
       }
+    }
+
+    // 白天低优先级：检查基地备用工具（背包≥2 才存 1，不阻塞主任务）
+    if (
+      st.mode === 'survival' &&
+      !st.dark &&
+      allowKey('dayWork') &&
+      !halted &&
+      ready('stock_backup', 600)
+    ) {
+      push('stock_backup', 'strategy', { strategy: 'stock_backup', params: {} }, 18,
+        '白天检查基地备用工具');
+      return;
     }
 
     // ── 日程：夜间守卫（敌对进入守家半径 → 有武器、血够才打）──
@@ -1293,6 +2508,55 @@ export class Lane {
     return !!r?.ok;
   }
 
+  /**
+   * 内置脑长时间占槽（补丁 count=0）时的保守自救：
+   * 只在连续被占 >= blockedSeconds、远离主人危险、且冷却/每小时上限允许时 reset-brain 一次。
+   * 如果重置后马上又被占，冷却会阻止拉锯；交给上报/人工。
+   */
+  async #maybeAutoResetBrain(now = Date.now()) {
+    const st = this.state;
+    const br = this.cfg.behavior?.brainRecovery || {};
+    if (br.enabled === false || !this.lockfix?.resetBrain) return false;
+    if (!st.reflexSince) return false;
+    const blockedMs = Number(br.blockedSeconds ?? 120) * 1000;
+    if (now - st.reflexSince < blockedMs) return false;
+    if (now < (st.brainResetCooldownUntil || 0)) return false;
+    const ownerSkip = Number(br.skipOwnerDangerSeconds ?? 60) * 1000;
+    if (st.ownerDangerAt && now - st.ownerDangerAt < ownerSkip) return false;
+    // 每小时上限
+    const hour = 3600_000;
+    if (!st.brainResetWindowStart || now - st.brainResetWindowStart > hour) {
+      st.brainResetWindowStart = now;
+      st.brainResetCount = 0;
+    }
+    if (Number(st.brainResetCount || 0) >= Number(br.maxPerHour ?? 3)) return false;
+
+    st.brainResetCooldownUntil = now + Number(br.cooldownSeconds ?? 300) * 1000;
+    st.brainResetCount = Number(st.brainResetCount || 0) + 1;
+    let r = null;
+    try {
+      r = await this.lockfix.resetBrain({ uuid: st.id });
+    } catch (e) {
+      r = { ok: false, error: String(e?.message || e) };
+    }
+    const reset = Number(r?.reset ?? 0);
+    this.trace.warn('brain_reset', {
+      companion: st.name,
+      note: `内置脑占用 ${Math.round((now - st.reflexSince) / 1000)}s，自动 reset-brain reset=${reset}${
+        r?.ok ? '' : ` fail=${r?.error ?? 'unknown'}`
+      }`,
+    });
+    if (r?.ok && reset > 0) {
+      st.instinctBlocked = false;
+      st.instinctBusyUntil = 0;
+      st.reflexStuckNotified = false;
+      st.reflexSince = 0;
+      this.#lastObserveAt = 0;
+      return true;
+    }
+    return false;
+  }
+
   /** 手动清锁（CLI / 控制 API / MCP tree_control op=unlock 用）。 */
   async unlockNow({ all = false } = {}) {
     this.#lastUnlockAt = Date.now();
@@ -1353,6 +2617,9 @@ export class Lane {
 
     st.cancelAll(reason);
     st.pos = null;
+    st.stuckSince = 0;
+    st.stuckAnchorPos = null;
+    st.stuckKind = null;
     st.hp = null;
     st.hunger = null;
     st.gameTime = null;
@@ -1465,15 +2732,32 @@ export class Lane {
       st.hunger = v.hunger;
       st.pos = { x: v.x, y: v.y, z: v.z };
       st.dimension = v.dim;
+      if (typeof v.in_water === 'boolean') st.inWater = v.in_water;
+      if (typeof v.on_ground === 'boolean') st.onGround = v.on_ground;
+      this.#clearStuckIfMoved(st);
       st.gameTime = v.game_time;
+      if (v.day_time != null && Number.isFinite(Number(v.day_time))) st.dayTime = Number(v.day_time);
       st.ownerOnline = !!v.owner_online;
       st.ownerDistance = v.owner_dist;
       st.ownerPos = { x: v.owner_x, y: v.owner_y, z: v.owner_z };
       st.hostileCount = v.hostile_n ?? 0;
+      markFact(st, 'hostileCount', { observedAt: Date.now(), source: 'observe', radius: 16, value: v.hostile_n ?? 0 });
     noteObservation(this.exec);
     st.lastObservedAt = this.exec.lastObservedAt;
+    st.lastSuccessfulObserveAt = Number(this.exec.lastObservedAt ?? Date.now());
+    // 观测成功 = 槽已恢复：清 blocked 计数，允许 resume 门通过
+    st.slotBlocked = 0;
+    st.slotBlockedSince = null;
+    st.slotBlockedNotified = 0;
+    // 观测成功 = 槽已恢复：解除"本能占用"标记，恢复正常调度
+    st.instinctBlocked = false;
+    st.instinctBlockCount = 0;
+    st.reflexSince = 0;
+    st.reflexCount = 0;
+    st.reflexStuckNotified = false;
       st.hostileDistance = v.hostile_d;
       st.dark = !!v.dark;
+      st.timePhase = statePhase(st);
       st.taskStatus = v.task_id
         ? {
             task_id: v.task_id,
@@ -1489,6 +2773,108 @@ export class Lane {
     }
   }
 
+  /** 触手主观测：地形/水/实体/昼夜；不再只依赖 slot_blocked 兜底。 */
+  async #maybeTentaclePrimary() {
+    const st = this.state;
+    if (!this.tentacle || !st?.id) return null;
+    const every = Math.max(1000, Number(this.cfg.tentacle?.primaryObserveMs ?? 3000));
+    const now = Date.now();
+    if (now - (st.lastTentaclePrimaryAt || 0) < every) return null;
+    st.lastTentaclePrimaryAt = now;
+    return this.#tryTentacleObserve('primary');
+  }
+
+  /**
+   * Lua 槽被内置脑占住时的降级观测：用触手 mod 读自身/附近实体，至少不让树完全失明。
+   * 只更新状态字段；不派动作、不替代 Lua 动作结果。
+   */
+  async #tryTentacleObserve(why = 'fallback') {
+    const st = this.state;
+    if (!this.tentacle || !st?.id) return null;
+    const now = Date.now();
+    if (now - (st.lastTentacleAt || 0) < 3000) return null;
+    let p = null;
+    try {
+      p = await this.tentacle.perception({ uuid: st.id, radius: 16 });
+    } catch {
+      return null;
+    }
+    if (!p?.ok) return null;
+    const s = p.self || {};
+    if (Number.isFinite(Number(s.hp))) st.hp = Number(s.hp);
+    if (Number.isFinite(Number(s.max_hp))) st.maxHp = Number(s.max_hp);
+    if (s.x != null && s.y != null && s.z != null) st.pos = { x: Number(s.x), y: Number(s.y), z: Number(s.z) };
+    this.#clearStuckIfMoved(st);
+    if (Number.isFinite(Number(s.food))) st.hunger = Number(s.food);
+    st.dark = s.day === true ? false : true;
+    if (Number.isFinite(Number(s.day_time))) st.tentacleDayTime = Number(s.day_time);
+    st.inWater = !!p.terrain?.in_water;
+    st.onGround = p.terrain?.on_ground !== false;
+    // P0-0a：触手是 in_water/on_ground 的权威源，写入带 gameTick 的三态 Fact
+    observeFact(this.factStore, {
+      key: 'in_water',
+      value: st.inWater,
+      source: 'tentacle',
+      gameTick: Number(st.gameTime ?? 0),
+      evidenceSeq: Number(st.lastTentacleAt ?? now),
+    });
+    observeFact(this.factStore, {
+      key: 'on_ground',
+      value: st.onGround,
+      source: 'tentacle',
+      gameTick: Number(st.gameTime ?? 0),
+      evidenceSeq: Number(st.lastTentacleAt ?? now),
+    });
+    st.timePhase = statePhase(st);
+    const ents = Array.isArray(p.entities) ? p.entities : [];
+    const hostiles = ents.filter((e) => e.category === 'hostile');
+    const animals = ents.filter((e) => e.category === 'animal');
+    st.hostileCount = hostiles.length;
+    markFact(st, 'hostileCount', { observedAt: Date.now(), source: 'tentacle', radius: 16, value: hostiles.length });
+    st.hostileDistance = hostiles.length
+      ? Math.min(...hostiles.map((e) => Number(e.distance) || 999))
+      : null;
+    st.animalCount = animals.length;
+    st.animalDistance = animals.length
+      ? Math.min(...animals.map((e) => Number(e.distance) || 999))
+      : null;
+    st.animalType = animals[0]?.type ?? null;
+    st.lastTentacleAt = now;
+    st.lastTentacleWhy = why;
+    st.tentacleSelf = { pos: st.pos, hp: st.hp, hunger: st.hunger, dark: st.dark };
+    if (now - (st.lastTentacleTraceAt || 0) > 10_000) {
+      st.lastTentacleTraceAt = now;
+      this.trace.info('tentacle_observe', {
+        companion: st.name,
+        note: `触手降级观测(${why})：hp=${st.hp} hunger=${st.hunger} hostiles=${st.hostileCount} pos=${st.pos.x},${st.pos.y},${st.pos.z}`,
+      });
+    }
+    return p;
+  }
+
+  /** 记录失败动作是否属于“卡住/走不过去”，供 stuck_escape 需求用。 */
+  #noteStuckOutcome(kind, st = this.state) {
+    const k = String(kind || '');
+    if (!['no_path', 'out_of_reach', 'stuck', 'path_failed', 'return_failed', 'travel_failed'].includes(k)) return;
+    if (!st.stuckSince) st.stuckSince = Date.now();
+    if (!st.stuckAnchorPos && st.pos) st.stuckAnchorPos = { ...st.pos };
+    st.stuckKind = k;
+  }
+
+  /** 状态更新后：真的移动了 >2.5 格就清除卡住标记。 */
+  #clearStuckIfMoved(st = this.state) {
+    if (!st.stuckSince || !st.stuckAnchorPos || !st.pos) return;
+    const d = Math.hypot(
+      Number(st.pos.x) - Number(st.stuckAnchorPos.x),
+      Number(st.pos.z) - Number(st.stuckAnchorPos.z),
+    );
+    if (d > 2.5) {
+      st.stuckSince = 0;
+      st.stuckAnchorPos = null;
+      st.stuckKind = null;
+    }
+  }
+
   async #maybeObserve() {
     const st = this.state;
     // 被别的驱动者占着槽时降低观测频率，免得每 3 秒刷一次失败
@@ -1500,6 +2886,7 @@ export class Lane {
     this.#lastObserveAt = Date.now();
 
     st.actionLock = true;
+    st.actionLockSince = Date.now();
     try {
       const r = await this.numen.lua(st.name, OBSERVE_LUA, 20_000);
       const raw = String(r.raw ?? r.message ?? '');
@@ -1513,8 +2900,41 @@ export class Lane {
             const patch = await this.lockfix.status();
             if (patch && patch.ok !== false && Number(patch.count ?? 0) === 0) {
               const holdMs = Number(this.cfg.behavior?.instinctHoldSeconds ?? 8) * 1000;
-              st.instinctBusyUntil = Math.max(st.instinctBusyUntil || 0, Date.now() + holdMs);
+              st.instinctBlocked = true;
+              st.instinctBlockedAt = Date.now();
+              st.instinctBlockCount = (st.instinctBlockCount || 0) + 1;
+              // 本能持续占用时指数退避（8s→16s→32s→60s），避免每 8 秒 resume→dispatch→suspend 刷屏
+              const backoff = Math.min(
+                60_000,
+                holdMs * Math.pow(2, Math.min(st.instinctBlockCount - 1, 3)),
+              );
+              st.instinctBusyUntil = Math.max(st.instinctBusyUntil || 0, Date.now() + backoff);
               st.lastReflexAt = Date.now();
+              if (!st.reflexSince) st.reflexSince = Date.now();
+              // 观测持续被本能拒绝也要算"本能风暴"：超阈值就升级上报
+              const stuckMs = Number(this.cfg.behavior?.instinctStuckSeconds ?? 30) * 1000;
+              if (Date.now() - st.reflexSince >= stuckMs && !st.reflexStuckNotified) {
+                st.reflexStuckNotified = true;
+                const seconds = Math.round((Date.now() - st.reflexSince) / 1000);
+                this.trace.warn('instinct_stuck', {
+                  companion: st.name,
+                  note: `观测被本能占用 ${st.instinctBlockCount} 次、累计 ${seconds}s，树无法行动`,
+                });
+                this.inbox.push({
+                  kind: 'instinct_stuck',
+                  companion: st.name,
+                  needsBrain: true,
+                  detail: {
+                    message: `同伴的动作槽被内置脑/本能连续占用 ${seconds} 秒（观测被拒 ${st.instinctBlockCount} 次），树一直无法观测/行动。`,
+                    hint:
+                      '不是僵尸锁（补丁 count=0）。可能被怪追、本能卡在逃跑/战斗循环。建议主人/LLM 干预：清掉追兵、传送同伴、或重建同伴。',
+                    seconds,
+                    blockedCount: st.instinctBlockCount,
+                  },
+                });
+              }
+              // 长时间占槽且不在主人危险窗口：保守尝试一次 reset-brain（有冷却/每小时上限）
+              if (await this.#maybeAutoResetBrain(Date.now())) return;
               if (Date.now() - (st.lastInstinctTraceAt || 0) > 10_000) {
                 st.lastInstinctTraceAt = Date.now();
                 this.trace.info('instinct_busy', {
@@ -1522,6 +2942,8 @@ export class Lane {
                   note: '内置脑/本能在占用 Lua 槽（补丁 count=0）→ 树让路等待，不硬刹',
                 });
               }
+              // 内置脑占槽：先用触手补一份自身/附近信息，避免树完全失明
+              await this.#tryTentacleObserve('slot_blocked');
               this.#lastObserveAt = 0; // 让路结束后尽快重试
               return;
             }
@@ -1650,15 +3072,32 @@ export class Lane {
       st.hunger = v.hunger;
       st.pos = { x: v.x, y: v.y, z: v.z };
       st.dimension = v.dim;
+      if (typeof v.in_water === 'boolean') st.inWater = v.in_water;
+      if (typeof v.on_ground === 'boolean') st.onGround = v.on_ground;
+      this.#clearStuckIfMoved(st);
       st.gameTime = v.game_time;
+      if (v.day_time != null && Number.isFinite(Number(v.day_time))) st.dayTime = Number(v.day_time);
       st.ownerOnline = !!v.owner_online;
       st.ownerDistance = v.owner_dist;
       st.ownerPos = { x: v.owner_x, y: v.owner_y, z: v.owner_z };
       st.hostileCount = v.hostile_n ?? 0;
+      markFact(st, 'hostileCount', { observedAt: Date.now(), source: 'observe', radius: 16, value: v.hostile_n ?? 0 });
     noteObservation(this.exec);
     st.lastObservedAt = this.exec.lastObservedAt;
+    st.lastSuccessfulObserveAt = Number(this.exec.lastObservedAt ?? Date.now());
+    // 观测成功 = 槽已恢复：清 blocked 计数，允许 resume 门通过
+    st.slotBlocked = 0;
+    st.slotBlockedSince = null;
+    st.slotBlockedNotified = 0;
+    // 观测成功 = 槽已恢复：解除"本能占用"标记，恢复正常调度
+    st.instinctBlocked = false;
+    st.instinctBlockCount = 0;
+    st.reflexSince = 0;
+    st.reflexCount = 0;
+    st.reflexStuckNotified = false;
       st.hostileDistance = v.hostile_d;
       st.dark = !!v.dark;
+      st.timePhase = statePhase(st);
       // 觅食 / 战斗评估的感知
       st.foodCount = v.food ?? 0;
       st.foodKinds = v.food_kinds ?? 0;
@@ -1675,7 +3114,10 @@ export class Lane {
             .map(([item, count]) => ({ item: String(item), count: Number(count) || 0 }))
         : [];
       // 一旦包里有吃的，"要饿死了"的停手状态就解除（大脑给食/自己捡到都算）
-      if ((st.foodCount ?? 0) > 0) st.survivalHaltedUntil = 0;
+      if ((st.foodCount ?? 0) > 0) {
+        st.survivalHaltedUntil = 0;
+        st.foodRetryAt = 0;
+      }
       st.taskStatus = v.task_id
         ? {
             task_id: v.task_id,
@@ -1695,6 +3137,7 @@ export class Lane {
       }
     } finally {
       st.actionLock = false;
+    st.actionLockSince = 0;
     }
   }
 
@@ -1735,14 +3178,59 @@ export class Lane {
       return;
     }
     st.actionLock = true;
+    st.actionLockSince = Date.now();
     st.current = { goalId: goal.id, skill: `tactic:${tacticId}`, startedAt: new Date().toISOString() };
     st.lastHeartbeatAt = Date.now();
     goal.status = GoalStatus.RUNNING;
     st.tactic = { id: tacticId, atom: null, priorityClass: goal.priorityClass ?? null, startedAt: new Date().toISOString() };
     const started = Date.now();
     const goalPriority = Number(goal.priority ?? 30);
+    openPriorityTx(st, goal, goalPriority, st.tactic?.priorityClass ?? goal.priorityClass ?? null);
 
     const executeAtom = async (atomId, params) => {
+      const txAtBoundary = st.priorityTx;
+      st.lastAtomId = atomId;
+      if (goal?.planId) noteAtomBegin(this.dispatchWatchdog, Date.now());
+      const heldBefore = st.held ?? null;
+      try {
+        this.trace.info('priority_atom_check', {
+          companion: st.name,
+          note: JSON.stringify({
+            atomId,
+            goalId: goal.id,
+            goalConsequence: goal.consequence ?? null,
+            goalPriority,
+            txId: txAtBoundary?.id ?? null,
+            at: Date.now(),
+          }),
+        });
+      } catch {
+        /* trace is observational only */
+      }
+      if (atomId !== 'atom.settle' && typeof goal.eligible === 'function' && !goal.eligible(st)) {
+        if (st.priorityTx) interruptTx(st.priorityTx, 'current_ineligible', { by: 'goal.eligible' });
+        st.priorityStats ??= { preempted: 0, legacy: 0, completed: 0, interrupted: 0, ineligible: 0 };
+        st.priorityStats.ineligible += 1;
+        settleCommitment(st, { status: 'ineligible' });
+        const event = {
+          type: 'priority/decision',
+          code: 'current_ineligible',
+          reason: 'current goal 已不满足 eligible，在原子边界释放',
+          from: `goal:${goal.id}`,
+          to: null,
+          goalId: goal.id,
+          atomId,
+          txId: txAtBoundary?.id ?? null,
+          atAtomBoundary: true,
+          at: Date.now(),
+        };
+        try {
+          this.trace.info('priority_decision', { companion: st.name, note: JSON.stringify(event) });
+        } catch {
+          /* trace is observational only */
+        }
+        return { ok: false, kind: 'current_ineligible', msg: 'goal ineligible' };
+      }
       // 原子边界安全中断：更高优先级的中断 → 让 runner 结束本战术（下一 tick 走中断）。
       // 例外：settle 是急刹后的清理动作，必须允许执行（否则会被同一个中断再次抢占）。
       if (atomId !== 'atom.settle') {
@@ -1754,9 +3242,101 @@ export class Lane {
               g.note.startsWith('interrupt:'),
           )
           .map((g) => g.note.slice(10));
-        const hit = pickInterrupt({ state: st, cfg: this.cfg, now: Date.now(), activeInterruptIds: activeIds });
-        if (hit && Number(hit.entry?.priority ?? 0) > goalPriority) {
-          return { ok: false, kind: 'preempted', msg: `interrupt:${hit.entry.id}` };
+        const hf = resolveFact(st, 'hostileCount', {
+          ttlMs: Number(this.cfg.behavior?.perceptionTtlMs ?? 5000),
+          authority: ['observe', 'tentacle'],
+        });
+        if (!hf.fresh) {
+          try {
+            this.trace.warn('priority_snapshot_stale', {
+              companion: st.name,
+              note: hf.conflict
+                ? 'hostileCount 多源冲突，禁止抢占'
+                : `hostileCount 过期 ${Math.round(Number(hf.ageMs ?? 0) / 1000)}s，禁止抢占`,
+            });
+          } catch {
+            /* observational only */
+          }
+        }
+        const hit = hf.fresh
+          ? pickInterrupt({ state: st, cfg: this.cfg, now: Date.now(), activeInterruptIds: activeIds })
+          : null;
+        if (hit) {
+          const latchOwner = st.plan?.id
+            ? `${st.plan.id}:${st.plan.cursor}`
+            : (goal.params?.tactic ?? goal.params?.strategy ?? st.tactic?.id ?? goal.planId ?? goal.id);
+          const latchKey = `${latchOwner}:${atomId}:${hit.entry.id}`;
+          st.preemptionLatch ??= {};
+          const latched = st.preemptionLatch[latchKey];
+          if (latched && Date.now() - Number(latched.at || 0) < 60_000) {
+            const note = `同一 goal/atom/interrupt 再次抢占：${latchKey}`;
+            this.trace.warn('priority_preempt_latched', { companion: st.name, note });
+            goal.status = GoalStatus.FAILED;
+            goal.endedAt = new Date().toISOString();
+            goal.lastResult = { ok: false, kind: 'preempt_loop', message: note };
+            if (st.plan && goal.planId === st.plan.id) {
+              this.#finishPlan(st.plan, PlanStatus.FAILED, 'preempt_loop', { silent: true });
+            }
+            return { ok: false, kind: 'preempt_loop', msg: note };
+          }
+          const priority = decidePreemption({
+            goal,
+            goalPriority,
+            priorityClass: st.tactic?.priorityClass ?? st.strategy?.priorityClass ?? goal.priorityClass ?? null,
+            hit,
+            now: Date.now(),
+          });
+          priority.atomId = atomId;
+          priority.event.goalId = goal.id;
+          priority.event.atomId = atomId;
+          priority.event.txId = st.priorityTx?.id ?? null;
+          priority.event.world = {
+            pos: st.pos ?? null,
+            hp: st.hp ?? null,
+            hunger: st.hunger ?? null,
+            hostileCount: st.hostileCount ?? null,
+            lastObservedAt: st.lastObservedAt ?? null,
+          };
+          recordInterruption(st, priority);
+          try {
+            this.trace.info('priority_decision', { companion: st.name, note: JSON.stringify(priority.event) });
+          } catch {
+            /* trace is observational only */
+          }
+          if (priority.preempt) {
+            st.preemptionLatch ??= {};
+            const latchOwner = st.plan?.id
+            ? `${st.plan.id}:${st.plan.cursor}`
+            : (goal.params?.tactic ?? goal.params?.strategy ?? st.tactic?.id ?? goal.planId ?? goal.id);
+          const latchKey = `${latchOwner}:${atomId}:${hit.entry.id}`;
+            st.preemptionLatch[latchKey] = {
+              at: Date.now(),
+              count: Number(st.preemptionLatch[latchKey]?.count ?? 0) + 1,
+            };
+            if (st.priorityTx) {
+              interruptTx(st.priorityTx, 'preempted', {
+                by: priority.decision.to,
+                incomingConsequence: priority.incoming?.consequence ?? null,
+              });
+            }
+            const worldAfter = await worldPostcheck(this, st);
+            try {
+              this.trace.info('priority_postcheck', {
+                companion: st.name,
+                note: JSON.stringify({
+                  code: 'postcheck',
+                  from: priority.decision.from,
+                  to: priority.decision.to,
+                  atomId,
+                  txId: txAtBoundary?.id ?? null,
+                  world: worldAfter,
+                }),
+              });
+            } catch {
+              /* trace is observational only */
+            }
+            return { ok: false, kind: 'preempted', msg: `interrupt:${hit.entry.id}` };
+          }
         }
       }
       let built;
@@ -1766,6 +3346,12 @@ export class Lane {
         return { ok: false, kind: 'bad_atom', msg: String(e?.message ?? e).slice(0, 300) };
       }
       st.tactic.atom = atomId;
+      if (atomId !== 'atom.settle' && txAtBoundary && (st.priorityTx !== txAtBoundary || txAtBoundary.status !== 'begun')) {
+        return { ok: false, kind: 'preempted', msg: 'priority_tx_changed' };
+      }
+      const atomConsequence = goal.consequence ?? consequenceForPriorityClass(goal.priorityClass) ?? CONSEQUENCE.UNDECLARED;
+      const atomReversal = goal.reversal ?? 'resumable';
+      const atomTx = openAtomTx(st, goal, atomId, atomConsequence, atomReversal);
       try {
         const r = await this.numen.lua(st.name, built.code, built.timeoutMs + 5_000);
         let v = r?.value;
@@ -1776,14 +3362,21 @@ export class Lane {
             v = { ok: false, kind: 'bad_result', msg: String(v).slice(0, 200) };
           }
         }
-        if (r?.kind === 'returned' && v && typeof v === 'object' && 'ok' in v) return v;
-        return {
-          ok: false,
-          kind: r?.kind === 'returned' ? 'bad_result' : (r?.kind ?? 'error'),
-          msg: String(r?.message ?? r?.raw ?? '').slice(0, 300),
-        };
+        const outcome = (r?.kind === 'returned' && v && typeof v === 'object' && 'ok' in v)
+          ? v
+          : {
+              ok: false,
+              kind: r?.kind === 'returned' ? 'bad_result' : (r?.kind ?? 'error'),
+              msg: String(r?.message ?? r?.raw ?? '').slice(0, 300),
+            };
+        traceToolAttempt(this, st, atomId, outcome, heldBefore);
+        finishAtomTx(st, atomTx, outcome);
+        return outcome;
       } catch (e) {
-        return { ok: false, kind: 'error', msg: String(e?.message ?? e).slice(0, 300) };
+        const outcome = { ok: false, kind: 'error', msg: String(e?.message ?? e).slice(0, 300) };
+        traceToolAttempt(this, st, atomId, outcome, heldBefore);
+        finishAtomTx(st, atomTx, outcome);
+        return outcome;
       }
     };
 
@@ -1793,6 +3386,11 @@ export class Lane {
     } catch (e) {
       res = { ok: false, kind: 'error', message: String(e?.message ?? e), atoms: 0 };
     }
+    // 战术生命周期台词（内容未打磨；触发规则统一走 #speak + 台词库冷却）
+    this.#speak(res.ok ? 'tactic_done' : 'task_failed', {
+      title: (typeof tacticId !== 'undefined' ? tacticId : strategyId),
+      reason: KIND_WORDS[String(res.kind)] ?? '没成',
+    });
     // 被抢占/超时/急刹 = 危险证据 → 执行档位降级 + 冷却（即使当下看着安全）
     noteInterrupt(this.exec, res.kind);
     if (needsSettle(res.kind)) {
@@ -1812,7 +3410,9 @@ export class Lane {
       }
     }
     const ms = Date.now() - started;
+    closePriorityTx(st, res.ok === true);
     st.actionLock = false;
+    st.actionLockSince = 0;
     st.current = null;
     st.tactic = null;
     st.lastHeartbeatAt = Date.now();
@@ -1826,6 +3426,7 @@ export class Lane {
       ms,
       at: new Date().toISOString(),
     };
+    this.#noteStuckOutcome(res.kind, st);
     goal.endedAt = new Date().toISOString();
     if (res.ok) {
       goal.status = GoalStatus.DONE;
@@ -1844,12 +3445,550 @@ export class Lane {
     }
   }
 
+  /**
+   * 战略包目标：skill='strategy'，params={strategy, params}。
+   * 战略层只调用战术包（不直接写原子）；本次 tick 内顺序执行，预算/熔断由 strategy-runner 管。
+   */
+  async #runStrategyGoal(goal) {
+    const st = this.state;
+    const strategyId = goal.params?.strategy;
+    const strategyParams = goal.params?.params ?? {};
+    goal.startedAt = new Date().toISOString();
+    goal.attempts += 1;
+    if (!strategyId || !getStrategy(strategyId)) {
+      goal.status = GoalStatus.FAILED;
+      goal.endedAt = new Date().toISOString();
+      goal.lastResult = {
+        ok: false,
+        kind: 'unknown_strategy',
+        message: `没有这个战略包：${strategyId ?? '(缺 params.strategy)'}`,
+      };
+      this.trace.warn('strategy_failed', { companion: st.name, note: `${goal.id} 缺战略包` });
+      return;
+    }
+    st.actionLock = true;
+    st.actionLockSince = Date.now();
+    st.current = { goalId: goal.id, skill: `strategy:${strategyId}`, startedAt: new Date().toISOString() };
+    if (['return_home', 'safety_hold', 'night_hold'].includes(strategyId)) {
+      st.homeCommitUntil = Math.max(Number(st.homeCommitUntil || 0), Date.now() + 45_000);
+    }
+    st.lastHeartbeatAt = Date.now();
+    goal.status = GoalStatus.RUNNING;
+    st.strategy = { id: strategyId, tactic: null, startedAt: new Date().toISOString() };
+    const started = Date.now();
+    const goalPriority = Number(goal.priority ?? 30);
+    openPriorityTx(st, goal, goalPriority, goal.priorityClass ?? null);
+
+    const executeAtom = async (atomId, atomParams) => {
+      const txAtBoundary = st.priorityTx;
+      st.lastAtomId = atomId;
+      if (goal?.planId) noteAtomBegin(this.dispatchWatchdog, Date.now());
+      const heldBefore = st.held ?? null;
+      try {
+        this.trace.info('priority_atom_check', {
+          companion: st.name,
+          note: JSON.stringify({
+            atomId,
+            goalId: goal.id,
+            goalConsequence: goal.consequence ?? null,
+            goalPriority,
+            txId: txAtBoundary?.id ?? null,
+            at: Date.now(),
+          }),
+        });
+      } catch {
+        /* trace is observational only */
+      }
+      if (atomId !== 'atom.settle') {
+        const activeIds = st.goals
+          .filter(
+            (g) =>
+              (g.status === 'pending' || g.status === 'running') &&
+              typeof g.note === 'string' &&
+              g.note.startsWith('interrupt:'),
+          )
+          .map((g) => g.note.slice(10));
+        const hf = resolveFact(st, 'hostileCount', {
+          ttlMs: Number(this.cfg.behavior?.perceptionTtlMs ?? 5000),
+          authority: ['observe', 'tentacle'],
+        });
+        if (!hf.fresh) {
+          try {
+            this.trace.warn('priority_snapshot_stale', {
+              companion: st.name,
+              note: hf.conflict
+                ? 'hostileCount 多源冲突，禁止抢占'
+                : `hostileCount 过期 ${Math.round(Number(hf.ageMs ?? 0) / 1000)}s，禁止抢占`,
+            });
+          } catch {
+            /* observational only */
+          }
+        }
+        const hit = hf.fresh
+          ? pickInterrupt({ state: st, cfg: this.cfg, now: Date.now(), activeInterruptIds: activeIds })
+          : null;
+        if (hit) {
+          const latchOwner = st.plan?.id
+            ? `${st.plan.id}:${st.plan.cursor}`
+            : (goal.params?.tactic ?? goal.params?.strategy ?? st.tactic?.id ?? goal.planId ?? goal.id);
+          const latchKey = `${latchOwner}:${atomId}:${hit.entry.id}`;
+          st.preemptionLatch ??= {};
+          const latched = st.preemptionLatch[latchKey];
+          if (latched && Date.now() - Number(latched.at || 0) < 60_000) {
+            const note = `同一 goal/atom/interrupt 再次抢占：${latchKey}`;
+            this.trace.warn('priority_preempt_latched', { companion: st.name, note });
+            goal.status = GoalStatus.FAILED;
+            goal.endedAt = new Date().toISOString();
+            goal.lastResult = { ok: false, kind: 'preempt_loop', message: note };
+            if (st.plan && goal.planId === st.plan.id) {
+              this.#finishPlan(st.plan, PlanStatus.FAILED, 'preempt_loop', { silent: true });
+            }
+            return { ok: false, kind: 'preempt_loop', msg: note };
+          }
+          const priority = decidePreemption({
+            goal,
+            goalPriority,
+            priorityClass: st.tactic?.priorityClass ?? st.strategy?.priorityClass ?? goal.priorityClass ?? null,
+            hit,
+            now: Date.now(),
+          });
+          priority.atomId = atomId;
+          priority.event.goalId = goal.id;
+          priority.event.atomId = atomId;
+          priority.event.txId = st.priorityTx?.id ?? null;
+          priority.event.world = {
+            pos: st.pos ?? null,
+            hp: st.hp ?? null,
+            hunger: st.hunger ?? null,
+            hostileCount: st.hostileCount ?? null,
+            lastObservedAt: st.lastObservedAt ?? null,
+          };
+          recordInterruption(st, priority);
+          try {
+            this.trace.info('priority_decision', { companion: st.name, note: JSON.stringify(priority.event) });
+          } catch {
+            /* trace is observational only */
+          }
+          if (priority.preempt) {
+            st.preemptionLatch ??= {};
+            const latchOwner = st.plan?.id
+            ? `${st.plan.id}:${st.plan.cursor}`
+            : (goal.params?.tactic ?? goal.params?.strategy ?? st.tactic?.id ?? goal.planId ?? goal.id);
+          const latchKey = `${latchOwner}:${atomId}:${hit.entry.id}`;
+            st.preemptionLatch[latchKey] = {
+              at: Date.now(),
+              count: Number(st.preemptionLatch[latchKey]?.count ?? 0) + 1,
+            };
+            if (st.priorityTx) {
+              interruptTx(st.priorityTx, 'preempted', {
+                by: priority.decision.to,
+                incomingConsequence: priority.incoming?.consequence ?? null,
+              });
+            }
+            const worldAfter = await worldPostcheck(this, st);
+            try {
+              this.trace.info('priority_postcheck', {
+                companion: st.name,
+                note: JSON.stringify({
+                  code: 'postcheck',
+                  from: priority.decision.from,
+                  to: priority.decision.to,
+                  atomId,
+                  txId: txAtBoundary?.id ?? null,
+                  world: worldAfter,
+                }),
+              });
+            } catch {
+              /* trace is observational only */
+            }
+            return { ok: false, kind: 'preempted', msg: `interrupt:${hit.entry.id}` };
+          }
+        }
+      }
+      let built;
+      try {
+        built = buildAtom(atomId, atomParams);
+      } catch (e) {
+        return { ok: false, kind: 'bad_atom', msg: String(e?.message ?? e).slice(0, 300) };
+      }
+      st.strategy.tactic = atomId;
+      if (atomId !== 'atom.settle' && txAtBoundary && (st.priorityTx !== txAtBoundary || txAtBoundary.status !== 'begun')) {
+        return { ok: false, kind: 'preempted', msg: 'priority_tx_changed' };
+      }
+      const atomConsequence = goal.consequence ?? consequenceForPriorityClass(goal.priorityClass) ?? CONSEQUENCE.UNDECLARED;
+      const atomReversal = goal.reversal ?? 'resumable';
+      const atomTx = openAtomTx(st, goal, atomId, atomConsequence, atomReversal);
+      try {
+        const r = await this.numen.lua(st.name, built.code, built.timeoutMs + 5_000);
+        let v = r?.value;
+        if (typeof v === 'string') {
+          try {
+            v = JSON.parse(v);
+          } catch {
+            v = { ok: false, kind: 'bad_result', msg: String(v).slice(0, 200) };
+          }
+        }
+        const outcome = (r?.kind === 'returned' && v && typeof v === 'object' && 'ok' in v)
+          ? v
+          : {
+              ok: false,
+              kind: r?.kind === 'returned' ? 'bad_result' : (r?.kind ?? 'error'),
+              msg: String(r?.message ?? r?.raw ?? '').slice(0, 300),
+            };
+        traceToolAttempt(this, st, atomId, outcome, heldBefore);
+        finishAtomTx(st, atomTx, outcome);
+        return outcome;
+      } catch (e) {
+        const outcome = { ok: false, kind: 'error', msg: String(e?.message ?? e).slice(0, 300) };
+        traceToolAttempt(this, st, atomId, outcome, heldBefore);
+        finishAtomTx(st, atomTx, outcome);
+        return outcome;
+      }
+    };
+    const callTactic = async (tid, tparams) => runTactic(tid, tparams, { executeAtom });
+
+    // 死亡点（地点簿 death 记录）与死亡计数，供 secure_gear 判断"白天/安全/距离"
+    let deathPlace = null;
+    try {
+      const p = this.places?.list ? this.places.list({ kind: 'death' })[0] : null;
+      if (p?.pos) deathPlace = p.pos;
+    } catch {
+      /* 无地点簿则不做恢复 */
+    }
+    let homePlace = null;
+    try {
+      const b = this.places?.list ? this.places.list({ kind: 'base' })[0] : null;
+      if (b?.pos) homePlace = b.pos;
+    } catch {
+      /* 无地点簿则不做回家 */
+    }
+    let res;
+    const pre = readinessPreflight(strategyId, st);
+    const hardPreflight = ['mine_coal', 'make_charcoal'].includes(strategyId);
+    if (hardPreflight && !pre.ok) {
+      res = {
+        ok: false,
+        kind: 'need_tools',
+        message: `预检未通过：${pre.missing.join(',')}`,
+        tactics: 0,
+        steps: [],
+        ms: 0,
+      };
+      this.trace.warn('preflight_block', {
+        companion: st.name,
+        note: `${strategyId} 缺少 ${pre.missing.join(',')}`,
+      });
+    } else {
+      try {
+        res = await runStrategy(strategyId, strategyParams, {
+          callTactic,
+          state: st,
+          facts: this.factStore,
+          deathPlace,
+          homePlace,
+          deathsRecent: Number(st.deathCountRecent ?? 0),
+          tentacle: this.tentacle,
+        });
+      } catch (e) {
+        res = { ok: false, kind: 'error', message: String(e?.message ?? e), tactics: 0, steps: [] };
+      }
+    }
+    st.learning ??= createLearningState();
+    recordStrategyOutcome(st.learning, {
+      strategyId,
+      ok: !!res.ok,
+      kind: res.kind ?? null,
+      ms: Number(res.ms ?? 0),
+      now: Date.now(),
+    });
+    if (!res.ok && res.kind !== 'preempted') this.#noteFailure(res.kind ?? 'failed', 'strategy', true, strategyId, st.lastAtomId ?? null);
+    if (res.ok) {
+      st.waitUntil = 0;
+      st.blocked = null;
+      clearTerminationAttempt(st.failureTermination, 'strategy', strategyId);
+    }
+    if (res.ok && ['secure_gear', 'craft_tools', 'bootstrap_kit', 'craft_gear'].includes(strategyId)) {
+      clearToolFailure(st, 'pickaxe');
+      clearToolFailure(st, 'axe');
+    }
+    // 失败后复检：工具/装备类失败 → 刷新就绪缺口，清除对应需求冷却，下一轮优先进补装备
+    if (['need_tools', 'no_pickaxe', 'no_rod', 'no_weapon', 'need_gear'].includes(String(res.kind))) {
+      st.readiness = evaluateReadiness(st);
+      st.needMeta ??= { retryAt: {}, lastGoalId: {} };
+      delete st.needMeta.retryAt.get_weapon;
+      delete st.needMeta.retryAt.get_tools;
+      this.trace.info('postflight_gap', {
+        companion: st.name,
+        note: `${strategyId} ${res.kind}；就绪缺口：${(st.readiness.missing || []).map((m) => m.label).join(',') || '无'}`,
+      });
+    }
+    // 需求目标：失败/等待后 15s 再试，避免每 tick 重复排；成功/完成后由 syncNeeds 清冷却
+    const needId = typeof goal.note === 'string' && goal.note.startsWith('need:')
+      ? goal.note.slice(5)
+      : null;
+    if (needId) {
+      st.needMeta ??= { retryAt: {}, lastGoalId: {} };
+      // wait 等 60s；secure_gear/secure_food 失败也别 15s 反复重试
+      const delay =
+        res.kind === 'wait' || strategyId === 'secure_gear' || strategyId === 'secure_food'
+          ? 60_000
+          : 15_000;
+      st.needMeta.retryAt[needId] = Date.now() + delay;
+    }
+    if (strategyId === 'secure_food' && !res.ok) {
+      // 连续找不到食物：指数退避（60→120→240→300s），别每分钟重开
+      st.foodFailStreak = Number(st.foodFailStreak ?? 0) + 1;
+      const delayMs = Math.min(
+        300_000,
+        60_000 * 2 ** Math.max(0, Number(st.foodFailStreak) - 1),
+      );
+      st.foodRetryAt = Date.now() + delayMs;
+      if (needId) st.needMeta.retryAt[needId] = Date.now() + delayMs;
+      if (Number(st.foodFailStreak) >= 2) {
+        this.#reportHelp(
+          'no_food',
+          '连续找不到食物',
+          '请给同伴食物，或指一个动物/箱子/开放水域；它会先做别的事并稍后再试',
+        );
+      }
+    } else if (strategyId === 'secure_food' && res.ok) {
+      st.foodFailStreak = 0;
+    }
+    if (strategyId === 'escape_stuck') {
+      if (res.ok) {
+        st.stuckEscapeFails = 0;
+        st.stuckEscapeCooldownUntil = 0;
+        st.stuckSince = 0;
+        st.stuckAnchorPos = null;
+        st.stuckKind = null;
+      } else {
+        st.stuckEscapeFails = Number(st.stuckEscapeFails || 0) + 1;
+        const delayMs = Math.min(300_000, 60_000 * 2 ** Math.max(0, st.stuckEscapeFails - 1));
+        st.stuckEscapeCooldownUntil = Date.now() + delayMs;
+        this.trace.warn('stuck_escape_cooldown', {
+          companion: st.name,
+          note: `escape_stuck 失败 ${st.stuckEscapeFails} 次，冷却 ${Math.round(delayMs / 1000)}s`,
+        });
+      }
+    }
+    // 白天过夜准备成功 → 今天降到最低优先度，晚上不再活跃
+    if (strategyId === 'prepare_for_night' && res.ok) {
+      const day = worldDayIndex(st);
+      if (day != null) st.nightPrepDay = day;
+    }
+    this.#speak(res.ok ? 'tactic_done' : 'task_failed', {
+      title: (typeof tacticId !== 'undefined' ? tacticId : strategyId),
+      reason: KIND_WORDS[String(res.kind)] ?? '没成',
+    });
+    noteInterrupt(this.exec, res.kind);
+    if (needsSettle(res.kind)) {
+      if (this.lockfix && ['timeout', 'slot_blocked', 'detached'].includes(String(res.kind))) {
+        try {
+          await this.lockfix.unlock({ uuid: st.id });
+        } catch {
+          /* 补丁不在线：settle 会尽量 task.stop */
+        }
+        await sleep(300);
+      }
+      try {
+        await runSettle(executeAtom);
+      } catch {
+        /* settle 失败不改变原结果 */
+      }
+    }
+    const ms = Date.now() - started;
+    closePriorityTx(st, res.ok === true);
+    st.actionLock = false;
+    st.actionLockSince = 0;
+    st.current = null;
+    if (res.ok && ['return_home', 'safety_hold', 'night_hold'].includes(strategyId)) {
+      st.homeCommitUntil = 0;
+      st.homeDwellUntil = Date.now() + 30_000;
+    }
+    st.strategy = null;
+    st.lastHeartbeatAt = Date.now();
+    st.lastActionAt = Date.now();
+    st.lastAction = {
+      skill: `strategy:${strategyId}`,
+      goalId: goal.id,
+      ok: res.ok === true,
+      kind: res.kind ?? 'ok',
+      message: res.message ?? '',
+      ms,
+      at: new Date().toISOString(),
+    };
+    this.#noteStuckOutcome(res.kind, st);
+    goal.endedAt = new Date().toISOString();
+    if (res.ok) {
+      goal.status = GoalStatus.DONE;
+      goal.lastResult = { ok: true, strategy: strategyId, tactics: res.tactics, steps: res.steps, ms };
+      this.trace.info('strategy_done', {
+        companion: st.name,
+        note: `${goal.id} ${strategyId} ok tactics=${res.tactics} ${ms}ms`,
+      });
+    } else {
+      goal.status = GoalStatus.FAILED;
+      goal.lastResult = {
+        ok: false,
+        kind: res.kind,
+        message: res.message,
+        strategy: strategyId,
+        tactics: res.tactics,
+        steps: res.steps,
+        ms,
+      };
+      this.trace.warn('strategy_failed', {
+        companion: st.name,
+        note: `${goal.id} ${strategyId} ${res.kind} tactics=${res.tactics} ${ms}ms: ${res.message ?? ''}`,
+      });
+    }
+  }
+
+  /** 移动动作 postcheck：触手 HTTP，不占 Lua 槽；unknown 最多重观测 2 次。 */
+  async #postcheckMoveGoal(outcome) {
+    const st = this.state;
+    if (!this.tentacle || !st.id) return outcome;
+    const tx = beginTx({ action: 'move', expected: ['in_water=false'], sideEffect: 'move' });
+    settleTx(tx, { ok: true });
+    for (let i = 0; i < 2; i += 1) {
+      let p = null;
+      try {
+        p = await this.tentacle.perception({ uuid: st.id, radius: 8 });
+      } catch {
+        p = null;
+      }
+      if (p?.ok && p.terrain) {
+        observeFact(this.factStore, {
+          key: 'in_water',
+          value: !!p.terrain.in_water,
+          source: 'tentacle',
+          gameTick: Number(st.gameTime ?? 0),
+        });
+        observeFact(this.factStore, {
+          key: 'on_ground',
+          value: p.terrain.on_ground !== false,
+          source: 'tentacle',
+          gameTick: Number(st.gameTime ?? 0),
+        });
+        if (i === 0) postcheckTx(tx, { passed: !p.terrain.in_water, evidence: p.terrain });
+        else repostcheckTx(tx, { passed: !p.terrain.in_water, evidence: p.terrain });
+        if (p.terrain.in_water) {
+          return {
+            ...outcome,
+            ok: false,
+            kind: 'postcheck_failed',
+            message: '移动返回成功，但触手复核仍在水中',
+            data: { ...(outcome.data || {}), postcheck: { in_water: true }, txStatus: tx.status },
+          };
+        }
+        return {
+          ...outcome,
+          data: { ...(outcome.data || {}), postcheck: { in_water: false }, txStatus: tx.status },
+        };
+      }
+      if (i === 0) postcheckTx(tx, { uncertain: true });
+      else repostcheckTx(tx, { uncertain: true });
+      if (i === 0) await sleep(250);
+    }
+    return {
+      ...outcome,
+      ok: false,
+      kind: 'info_missing',
+      message: '移动后无法确认是否上岸（触手观测失败）',
+      data: { ...(outcome.data || {}), txStatus: 'unknown' },
+    };
+  }
+
   async #runGoal(goal) {
     const st = this.state;
+    this.#auditAction(goal);
+    // 基地保护兜底：人在基地 bbox 内时，自主挖矿一律拒绝，不消耗失败预算。
+    if (this.cfg.behavior?.baseGuard !== false && ['dig_nearby', 'mine_nearby', 'dig_cells'].includes(String(goal.skill))) {
+      const regions = baseRegions(this.places);
+      if (isInsideBase(st.pos, regions)) {
+        this.trace.warn('base_dig_refused', {
+          companion: st.name,
+          note: `${goal.skill} 在基地 bbox 内，拒绝自主挖掘`,
+        });
+        goal.status = GoalStatus.FAILED;
+        goal.endedAt = new Date().toISOString();
+        goal.lastResult = { ok: false, kind: 'refused', message: '基地内禁止自主挖掘' };
+        return;
+      }
+    }
+    const gate = this.#dispatchGate({ path: 'action', goal });
+    if (!gate.allow) {
+      goal.lastResult = { ok: false, kind: 'gate_deferred', message: gate.reason };
+      goal.endedAt = new Date().toISOString();
+      return;
+    }
     // 战术包目标：skill='tactic'，params={tactic, params}；由 tactic-runner 一次跑多个原子，
     // 原子边界会检查安全中断（见 #runTacticGoal），预算/熔断在 runner 内。
     if (goal.skill === 'tactic') {
       return this.#runTacticGoal(goal);
+    }
+    // 战略包目标：skill='strategy'，params={strategy, params}；由 strategy-runner 规划并顺序调用战术包。
+    if (goal.skill === 'strategy') {
+      return this.#runStrategyGoal(goal);
+    }
+
+    // 执行闸门（docs/20 §10）：field-guarded 时禁止自主长黑盒技能。
+    // 豁免：安全中断目标（note=interrupt:*）与显式高优先级（>=90）。
+    if (
+      this.exec.mode === 'field-guarded' &&
+      this.execPolicy?.gateLongSkills !== false &&
+      isLongSkill(goal.skill)
+    ) {
+      const isInterrupt = typeof goal.note === 'string' && goal.note.startsWith('interrupt:');
+      const highPriority = Number(goal.priority ?? 0) >= 90;
+      // 安全型自动计划（feed/go_home）的步骤放行：回家/吃饭属于自保，不该被闸门卡住
+      const planOfGoal =
+        goal.planId && st.plan?.id === goal.planId
+          ? st.plan
+          : (st.planHistory || []).find((p) => p.id === goal.planId);
+      const safetyPlan = !!planOfGoal && ['feed', 'go_home', 'fish_food'].includes(planOfGoal.recipeId);
+      if (!isInterrupt && !highPriority && !safetyPlan) {
+        // 计划步骤被 field-guarded 暂缓：挂起整个计划，别让 planControl 每 tick 重推同一步
+        if (planOfGoal && st.plan?.id === planOfGoal.id) {
+          goal.status = GoalStatus.CANCELLED;
+          goal.endedAt = new Date().toISOString();
+          suspendPlan(planOfGoal, 'field_guarded');
+          planOfGoal.gateReason = this.exec.reason;
+          planOfGoal.gateMode = this.exec.mode;
+          if (Date.now() - (st.lastExecGateTraceAt || 0) > 10_000) {
+            st.lastExecGateTraceAt = Date.now();
+            this.trace.info('exec_gate_plan', {
+              companion: st.name,
+              note: `${planOfGoal.id} ${planOfGoal.recipeId} 因 field-guarded 挂起，等环境恢复 gate=${planOfGoal.gateMode}/${planOfGoal.gateReason}`,
+            });
+          }
+          return;
+        }
+        goal.status = GoalStatus.FAILED;
+        goal.endedAt = new Date().toISOString();
+        goal.lastResult = {
+          ok: false,
+          kind: 'deferred_field_guarded',
+          message: `环境有风险（${this.exec.reason}），长动作 ${goal.skill} 已暂缓`,
+        };
+        st.lastAction = {
+          skill: goal.skill,
+          goalId: goal.id,
+          ok: false,
+          kind: 'deferred_field_guarded',
+          message: goal.lastResult.message,
+          ms: 0,
+          at: new Date().toISOString(),
+        };
+        if (Date.now() - (st.lastExecGateTraceAt || 0) > 10_000) {
+          st.lastExecGateTraceAt = Date.now();
+          this.trace.info('exec_gate', {
+            companion: st.name,
+            note: `field-guarded(${this.exec.reason}) 拒绝长动作 ${goal.skill}`,
+          });
+        }
+        return;
+      }
     }
     const skill = getSkill(goal.skill);
 
@@ -1867,6 +4006,7 @@ export class Lane {
     }
 
     st.actionLock = true;
+    st.actionLockSince = Date.now();
     st.current = { goalId: goal.id, skill: goal.skill, startedAt: new Date().toISOString() };
     st.lastHeartbeatAt = Date.now(); // 技能里会 arm 一个 task.timer 定时上报，这里先记发车时间
     goal.status = GoalStatus.RUNNING;
@@ -1878,6 +4018,7 @@ export class Lane {
       built = skill.build({ state: st, cfg: this.cfg, places: this.places }, goal.params);
     } catch (e) {
       st.actionLock = false;
+    st.actionLockSince = 0;
       st.current = null;
       goal.status = GoalStatus.FAILED;
       goal.lastResult = { ok: false, kind: 'build_error', message: String(e) };
@@ -1900,6 +4041,8 @@ export class Lane {
       (goal.stepAs && st.plan && st.plan.source === 'auto');
     const autoCapMs = Math.max(10, Number(this.cfg.loop?.autoActionTimeoutSeconds ?? 60)) * 1000;
     if (isAutoGoal) softMs = Math.min(softMs, autoCapMs);
+    // D：疲劳影响表现（只缩自动动作预算；LLM 显式目标保持原预算）
+    if (isAutoGoal) softMs = effectiveAutoTimeout(softMs, st.drives);
     st.current.budgetMs = softMs; // 供状态显示"自报预算"，超了就是可疑
     let r;
     try {
@@ -1909,6 +4052,7 @@ export class Lane {
       r = { kind: 'error', message: String(e) };
     } finally {
       st.actionLock = false;
+    st.actionLockSince = 0;
       st.current = null;
       st.lastActionAt = Date.now();
     }
@@ -1950,9 +4094,55 @@ export class Lane {
       };
     }
 
+    // P0-0a：移动类动作 postcheck——到达不等于上岸/在地面；触手不占 Lua 槽
+    if (
+      outcome.ok &&
+      ['go_to', 'move_segment', 'move_to', 'try_step'].includes(String(goal.skill))
+    ) {
+      outcome = await this.#postcheckMoveGoal(outcome);
+    } else if (outcome.ok && String(goal.skill) === 'place_build') {
+      // place_build 自检：没放下就 fail；再做一次轻量 postcheck
+      const placed = Number(outcome.data?.placed ?? 0);
+      if (placed <= 0) {
+        outcome = {
+          ok: false,
+          kind: 'postcheck_failed',
+          message: '放置技能返回成功但没有放下任何方块',
+          data: outcome.data,
+        };
+      }
+    } else if (outcome.ok && String(goal.skill) === 'collect_items' && goal.params?.expectCollect) {
+      const n = Number(outcome.data?.collected ?? 0);
+      if (n <= 0) {
+        outcome = {
+          ok: false,
+          kind: 'postcheck_failed',
+          message: '期望捡到物品，但 collected=0',
+          data: outcome.data,
+        };
+      }
+    }
+
     goal.endedAt = new Date().toISOString();
     goal.lastResult = { ...outcome, ms };
     noteInterrupt(this.exec, outcome.kind);
+
+    // 直接技能超时：游戏里的 Lua 任务可能仍在跑。先清一次动作锁，
+    // 避免 plan 被幽灵任务拖成 active/steps=0 的假死。
+    if (!outcome.ok && outcome.kind === 'timeout' && this.lockfix) {
+      try {
+        const r = await this.lockfix.unlock({ uuid: st.id });
+        this.trace.warn('task_timeout_unlock', {
+          companion: st.name,
+          note: `timeout 后清锁：cleared=${r?.cleared ?? '?'}`,
+        });
+      } catch (e) {
+        this.trace.warn('task_timeout_unlock_failed', {
+          companion: st.name,
+          note: String(e?.message ?? e),
+        });
+      }
+    }
 
     // 最近一次动作结果（供 tree_status / cli 显示"上一步干了啥"）
     const autoKey =
@@ -1968,6 +4158,7 @@ export class Lane {
       ms,
       at: goal.endedAt,
     };
+    this.#noteStuckOutcome(outcome.ok ? 'ok' : outcome.kind, st);
 
     // 分片动作：没做完但还有进展 → 续派下一段（下一 tick 会先跑中断检查，再执行）
     if (outcome.ok && outcome.data && outcome.data.partial) {
@@ -2179,6 +4370,77 @@ export class Lane {
    *   when → 台词库 → 冷却/权重 → 填槽 → say
    * 全局最小间隔由 cfg.lines.minGapSeconds 控制，避免刷屏。
    */
+  /**
+   * 需要玩家动手的失败：写入短报，tree_status/tree_inbox 可见。
+   * 只报一次/同类 120s，避免刷屏。
+   */
+  /** 失败三分 + 记账；只写 trace，不自动弹求助（避免污染现有断言）。 */
+  #noteFailure(kind, scope, hasAlternate = true, paramKey = null, atomId = null) {
+    if (String(kind) === 'refused') return; // 策略拒绝不是能力失败
+    const st = this.state;
+    st.failure ??= createFailureState();
+    st.failureTermination ??= createTerminationState();
+    const r = recordFailure(st.failure, kind, { scope, hasAlternate });
+    const term = recordTerminationAttempt(st.failureTermination, {
+      scope,
+      kind,
+      paramKey: paramKey ?? `${scope}:${kind}`,
+      atomId,
+      hasAlternate,
+    });
+    st.failureTermination = term.state;
+    if (term.action === 'wait') {
+      st.waitUntil = Date.now() + Number(term.waitMs ?? 1000);
+      st.waitReason = term.reason;
+      this.trace.info('failure_termination', {
+        companion: st.name,
+        note: `${scope}:${kind} -> wait ${term.waitMs}ms (${term.code}) ${term.reason}`,
+      });
+    }
+    if (term.action === 'abandon' || term.action === 'help') {
+      st.blocked = {
+        scope,
+        kind,
+        action: term.action,
+        code: term.code,
+        reason: term.reason,
+        at: new Date().toISOString(),
+      };
+      this.trace.warn('failure_termination', {
+        companion: st.name,
+        note: `${scope}:${kind} -> ${term.action} (${term.code}) ${term.reason}`,
+      });
+    }
+    const budget = failureBudgetExceeded(st.failure);
+    if (budget.exceeded && Date.now() > Number(st.failureDegradedUntil || 0)) {
+      st.failureDegradedUntil = Date.now() + 60_000;
+      this.trace.warn('failure_budget', {
+        companion: st.name,
+        note: `5 分钟内失败 ${budget.count} 次（上限 ${budget.max}）→ 降级 60s，只做保守动作`,
+      });
+    }
+    this.trace.info('failure_triage', {
+      companion: st.name,
+      note: `${scope}:${kind} -> ${r.cls}（同类第 ${r.attempts} 次${r.shouldHelp ? '，应考虑求助' : ''}）`,
+    });
+    return r;
+  }
+
+  #reportHelp(kind, message, hint) {
+    const st = this.state;
+    const now = Date.now();
+    if (st.helpNeeded?.kind === kind && now - Number(st.lastHelpAt || 0) < 120_000) return;
+    st.lastHelpAt = now;
+    st.helpNeeded = { kind, message, hint, at: new Date().toISOString() };
+    this.trace.warn('help_needed', { companion: st.name, note: `${kind}: ${hint}` });
+    this.inbox.push({
+      kind: 'intervention_needed',
+      companion: st.name,
+      needsBrain: false,
+      detail: { kind, message, hint },
+    });
+  }
+
   #speak(when, slots = {}) {
     if (!this.lines || !this.lines.enabled) return;
     const st = this.state;
@@ -2271,6 +4533,7 @@ export class Lane {
     // 上报里直接给处置顺序，别让大脑猜。
     if (ev.kind === 'death') {
       st.deathAt = new Date().toISOString();
+      st.deathCountRecent = Number(st.deathCountRecent ?? 0) + 1;
       // 手头的计划立即作废（人死了，步数/游标都不算数）
       if (planAlive(st.plan)) this.#finishPlan(st.plan, PlanStatus.ABANDONED, 'death', { silent: true });
       this.trace.warn('death', { companion: st.name, note: (ev.message ?? '').slice(0, 200) });
@@ -2353,6 +4616,30 @@ export class Lane {
       const holdMs = Number(this.cfg.behavior?.instinctHoldSeconds ?? 8) * 1000;
       st.instinctBusyUntil = Math.max(st.instinctBusyUntil || 0, Date.now() + holdMs);
       st.lastReflexAt = Date.now();
+      st.reflexCount = (st.reflexCount || 0) + 1;
+      if (!st.reflexSince) st.reflexSince = Date.now();
+      // 连续本能风暴：超过阈值就升级上报，让 LLM/主人介入（树自己无法观测/行动）
+      const stuckMs = Number(this.cfg.behavior?.instinctStuckSeconds ?? 30) * 1000;
+      if (Date.now() - st.reflexSince >= stuckMs && !st.reflexStuckNotified) {
+        st.reflexStuckNotified = true;
+        const seconds = Math.round((Date.now() - st.reflexSince) / 1000);
+        this.trace.warn('instinct_stuck', {
+          companion: st.name,
+          note: `连续 reflex ${st.reflexCount} 次、${seconds}s（可能被追/卡住），树无法观测`,
+        });
+        this.inbox.push({
+          kind: 'instinct_stuck',
+          companion: st.name,
+          needsBrain: true,
+          detail: {
+            message: `同伴连续触发逃跑反射超过 ${seconds} 秒（${st.reflexCount} 次），树一直在让路、无法观测/行动。`,
+            hint:
+              '可能被怪追着脱不了身，或本能卡在逃跑循环。建议主人/LLM 干预：清掉追兵、把同伴传送走、或重建同伴。',
+            seconds,
+            reflexCount: st.reflexCount,
+          },
+        });
+      }
       // 本能出手 = 环境不安全的直接证据 → 执行档位立即降级
       const modeBeforeReflex = this.exec.mode;
       noteRisk(this.exec, 'reflex', st.lastReflexAt);
